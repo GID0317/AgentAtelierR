@@ -13,19 +13,25 @@ class TapReaction {
   final String partName;
   final String label;
 
-  String voiceAsset(int variant) {
+  String voiceAsset(int variant, {bool asmr = false}) {
+    final mode = asmr ? 'asmr' : 'normal';
     final group = number.toString().padLeft(3, '0');
     final clip = variant.clamp(1, 3).toString().padLeft(2, '0');
-    return 'audio/tap_voice/jp/normal/'
-        'jp_normal_motion_touch_A_${group}_$clip.m4a';
+    return 'audio/tap_voice/jp/$mode/'
+        'jp_${mode}_motion_touch_A_${group}_$clip.m4a';
   }
 
-  String localizedVoiceAsset(AppLanguage language, int variant) {
+  String localizedVoiceAsset(
+    AppLanguage language,
+    int variant, {
+    bool asmr = false,
+  }) {
     final locale = language.audioLocaleCode;
+    final mode = asmr ? 'asmr' : 'normal';
     final group = number.toString().padLeft(3, '0');
     final clip = variant.clamp(1, 3).toString().padLeft(2, '0');
-    return 'audio/tap_voice/$locale/normal/'
-        '${locale}_normal_motion_touch_A_${group}_$clip.m4a';
+    return 'audio/tap_voice/$locale/$mode/'
+        '${locale}_${mode}_motion_touch_A_${group}_$clip.m4a';
   }
 }
 

@@ -1,6 +1,7 @@
 import 'dart:ui';
 
 import 'package:alarm/alarm.dart';
+import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 import 'package:spine_flutter/spine_flutter.dart' hide Color;
 
@@ -9,9 +10,8 @@ import 'src/app_localization.dart';
 import 'src/app_shell.dart';
 import 'src/runtime_log.dart';
 
-Future<void> main() async {
+void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  await RuntimeLog.instance.initialize();
   FlutterError.onError = (details) {
     RuntimeLog.instance.error(
       'Flutter',
@@ -24,20 +24,84 @@ Future<void> main() async {
     RuntimeLog.instance.error('Platform', error, stackTrace);
     return false;
   };
-  RuntimeLog.instance.info('App', '应用启动，版本 0.5.0+14');
-  try {
-    await initSpineFlutter(enableMemoryDebugging: false);
-    await Alarm.init();
-    final controller = await AppController.load();
-    runApp(RyzaChatApp(controller: controller));
-  } on Object catch (error, stackTrace) {
-    RuntimeLog.instance.error('Startup', error, stackTrace);
-    rethrow;
+  runApp(const _BootstrapApp());
+}
+
+class _BootstrapApp extends StatefulWidget {
+  const _BootstrapApp();
+
+  @override
+  State<_BootstrapApp> createState() => _BootstrapAppState();
+}
+
+class _BootstrapAppState extends State<_BootstrapApp> {
+  AppController? _controller;
+  Object? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _initialize();
+  }
+
+  Future<void> _initialize() async {
+    try {
+      await RuntimeLog.instance.initialize();
+      RuntimeLog.instance.info('App', '应用启动，版本 0.7.0+15');
+      await initSpineFlutter(enableMemoryDebugging: false);
+      await Alarm.init();
+      await AudioPlayer.global.setAudioContext(
+        AudioContext(
+          android: const AudioContextAndroid(
+            audioFocus: AndroidAudioFocus.none,
+          ),
+          iOS: AudioContextIOS(
+            options: const {AVAudioSessionOptions.mixWithOthers},
+          ),
+        ),
+      );
+      final controller = await AppController.load();
+      await Future<void>.delayed(const Duration(seconds: 3));
+      if (mounted) setState(() => _controller = controller);
+    } on Object catch (error, stackTrace) {
+      RuntimeLog.instance.error('Startup', error, stackTrace);
+      if (mounted) setState(() => _error = error);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final controller = _controller;
+    if (controller != null) return AgentAtelierRApp(controller: controller);
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      home: ColoredBox(
+        color: Colors.white,
+        child: SafeArea(
+          child: Center(
+            child: _error == null
+                ? Image.asset(
+                    'assets/branding/agent_atelier_logo.png',
+                    width: MediaQuery.sizeOf(context).width * 0.85,
+                    fit: BoxFit.contain,
+                  )
+                : TextButton.icon(
+                    onPressed: () {
+                      setState(() => _error = null);
+                      _initialize();
+                    },
+                    icon: const Icon(Icons.refresh_rounded),
+                    label: const Text('加载失败，点击重试'),
+                  ),
+          ),
+        ),
+      ),
+    );
   }
 }
 
-class RyzaChatApp extends StatelessWidget {
-  const RyzaChatApp({super.key, required this.controller});
+class AgentAtelierRApp extends StatelessWidget {
+  const AgentAtelierRApp({super.key, required this.controller});
 
   final AppController controller;
 
@@ -81,7 +145,7 @@ class RyzaChatApp extends StatelessWidget {
       animation: controller,
       builder: (context, _) => MaterialApp(
         debugShowCheckedModeBanner: false,
-        title: 'Ryza Chat Prototype',
+        title: 'AgentAtelierR',
         theme: lightTheme,
         darkTheme: darkTheme,
         themeMode: switch (controller.themePreference) {

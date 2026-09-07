@@ -16,8 +16,18 @@ class SoundscapeController {
   double? _bgmVolume;
   double? _ambientVolume;
   late final Future<Set<String>> _availableAssets = _loadAvailableAssets();
+  Future<void>? _pendingSync;
 
-  Future<void> sync(
+  Future<void> sync(AppController controller, {required bool worldMapVisible}) {
+    final previous = _pendingSync ?? Future<void>.value();
+    final next = previous.then(
+      (_) => _syncNow(controller, worldMapVisible: worldMapVisible),
+    );
+    _pendingSync = next.catchError((_) {});
+    return next;
+  }
+
+  Future<void> _syncNow(
     AppController controller, {
     required bool worldMapVisible,
   }) async {

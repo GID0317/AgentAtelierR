@@ -1,4 +1,4 @@
-# Ryza Chat Demo 更新日志
+# AgentAtelierR 更新日志
 
 ## 2026-09-04
 

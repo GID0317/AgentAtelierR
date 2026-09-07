@@ -6,6 +6,8 @@ import 'package:audioplayers/audioplayers.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
+import 'package:image_picker/image_picker.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:spine_flutter/spine_flutter.dart' hide Color;
 
 import 'ai_services.dart';
@@ -13,7 +15,9 @@ import 'app_controller.dart';
 import 'app_localization.dart';
 import 'audio_envelope.dart';
 import 'character_speech_driver.dart';
+import 'device_agent_tools.dart';
 import 'character_appearance.dart';
+import 'character_catalog.dart';
 import 'character_camera.dart';
 import 'character_expression.dart';
 import 'character_gaze.dart';
@@ -94,10 +98,12 @@ class ChatScreen extends StatefulWidget {
     super.key,
     required this.controller,
     required this.onMenuPressed,
+    required this.hideUi,
   });
 
   final AppController controller;
   final VoidCallback onMenuPressed;
+  final bool hideUi;
 
   @override
   State<ChatScreen> createState() => _ChatScreenState();
@@ -127,30 +133,35 @@ class _CachedSpeechSegment {
 class _ChatScreenState extends State<ChatScreen> {
   final _audioPlayer = AudioPlayer();
   final _effectPlayer = AudioPlayer();
-  final _aiClient = OpenAiCompatibleClient();
+  final _aiClient = OpenAiCompatibleClient(
+    agentToolExecutor: const DeviceAgentTools().execute,
+  );
   final _fishAudioClient = FishAudioClient();
   final _dashScopeTtsClient = DashScopeTtsClient();
   final _genericTtsClient = GenericTtsClient();
   final _secretStore = const SecretStore();
   final _inputController = TextEditingController();
   final _scrollController = ScrollController();
+  final _latestAssistantMessageKey = GlobalKey();
   final _random = Random();
   SpineWidgetController? _spineController;
+  late final SpineWidgetController _seatObjectController;
   late CharacterAppearance _appearance;
   Timer? _idleTimer;
-  Timer? _tapLabelTimer;
+  Timer? _tapReactionTimer;
   Timer? _speechFallbackTimer;
   Timer? _microMotionTimer;
   Timer? _expressionRelaxTimer;
   Timer? _facialDetailTimer;
   Timer? _blinkTimer;
   Timer? _blinkRestoreTimer;
+  Timer? _suggestionQuotaTimer;
   StreamSubscription<Duration>? _audioPositionSubscription;
   String? _currentIdleAnimation;
-  String? _lastTappedPart;
   bool _spineReady = false;
   bool _isReplying = false;
   bool _isContinuing = false;
+  bool _isSuggestingReply = false;
   bool _isCharacterSpeaking = false;
   bool _tapReactionActive = false;
   Offset? _gazePointer;
@@ -184,12 +195,16 @@ class _ChatScreenState extends State<ChatScreen> {
   List<_CachedSpeechSegment> _lastSpeech = const [];
   int _motionGeneration = 0;
   int _replyGeneration = 0;
+  int _textFollowGeneration = 0;
+  int? _activeAssistantSegmentIndex;
+  Duration _activeSegmentDisplayDuration = Duration.zero;
   StreamIterator<String>? _replyIterator;
   double? _manualPanelFraction;
   double? _stableBottomSafeInset;
   double? _stableBodyHeight;
   final List<ChatAttachment> _pendingAttachments = [];
   bool _characterToolsExpanded = false;
+  bool _showScrollToBottomIndicator = false;
 
   double _currentEmotionalIntensity = 0.5;
 
@@ -202,6 +217,12 @@ class _ChatScreenState extends State<ChatScreen> {
     if (_appearance.animated) {
       _spineController = _createSpineController(_appearance);
     }
+    _seatObjectController = SpineWidgetController(
+      onInitialized: (controller) {
+        // The object has no gameplay animation; keep its setup pose.
+        controller.animationState.getData().setDefaultMix(0.2);
+      },
+    );
     _audioPositionSubscription = _audioPlayer.onPositionChanged.listen(
       _updateLipSyncFromPlaybackPosition,
     );
@@ -215,6 +236,10 @@ class _ChatScreenState extends State<ChatScreen> {
       }
     });
     widget.controller.addListener(_handleControllerChange);
+    _scrollController.addListener(_handleConversationScroll);
+    _suggestionQuotaTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() {});
+    });
   }
 
   SpineWidgetController _createSpineController(CharacterAppearance appearance) {
@@ -258,6 +283,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _facialDetailTimer?.cancel();
     _blinkTimer?.cancel();
     _blinkRestoreTimer?.cancel();
+    _suggestionQuotaTimer?.cancel();
     _motionLoadGeneration += 1;
     setState(() {
       _appearance = next;
@@ -596,38 +622,7 @@ class _ChatScreenState extends State<ChatScreen> {
     }
 
     final profile = _performanceDirector?.profile;
-    // Iris meshes use the constrained offset bones, while highlights are
-    // siblings of those bones. Preserve their relation in iris-local space.
-    final eyeBaselines = <String, Offset>{};
-    for (final side in ['L', 'R']) {
-      final pupil = controller.skeleton.findBone('eyeball_${side}_offset');
-      final highlight = controller.skeleton.findBone('eyehilight_$side');
-      if (pupil != null && highlight != null) {
-        remember('eyehilight_$side');
-        final local = pupil.worldToLocal(
-          highlight.getWorldX(),
-          highlight.getWorldY(),
-        );
-        eyeBaselines[side] = Offset(local.x, local.y);
-      }
-    }
     void finishRig() {
-      controller.skeleton.updateWorldTransform(Physics.none);
-      for (final entry in eyeBaselines.entries) {
-        final pupil = controller.skeleton.findBone(
-          'eyeball_${entry.key}_offset',
-        )!;
-        final highlight = controller.skeleton.findBone(
-          'eyehilight_${entry.key}',
-        )!;
-        final parent = highlight.getParent();
-        if (parent == null) continue;
-        final world = pupil.localToWorld(entry.value.dx, entry.value.dy);
-        final local = parent.worldToLocal(world.x, world.y);
-        highlight
-          ..setX(local.x)
-          ..setY(local.y);
-      }
       controller.skeleton.updateWorldTransform(Physics.none);
     }
 
@@ -645,6 +640,8 @@ class _ChatScreenState extends State<ChatScreen> {
       'control_roll_neck',
       'control_roll_body_upper',
       'control_roll_body_lower',
+      'eyeball_L',
+      'eyeball_R',
       'head',
       'neck',
     }) {
@@ -760,11 +757,6 @@ class _ChatScreenState extends State<ChatScreen> {
     final startedAt = _gazeStartedAt;
     if (pointer == null || startedAt == null) return;
     final skeleton = controller.skeleton;
-    final target =
-        skeleton.findBone('control_aim_eye') ??
-        skeleton.findBone('control_eye') ??
-        skeleton.findBone('control_handle_eye');
-    if (target == null) return;
     final influence = _gazeHeld && widget.controller.gazeTrackingEnabled
         ? 1.0
         : characterGazeInfluence(DateTime.now().difference(startedAt));
@@ -778,29 +770,49 @@ class _ChatScreenState extends State<ChatScreen> {
     if (face == null) return;
     final origin = Offset(face.getWorldX(), face.getWorldY());
     final offset = gazeControlOffset(face: origin, pointer: pointer);
-    final parent = target.getParent();
-    // The eye controller lives off-stage. Convert a direction vector, not a
-    // world position relative to that controller's unrelated world origin.
-    final localOffset = parent == null
+    final controlTarget =
+        skeleton.findBone('control_aim_eye') ??
+        skeleton.findBone('control_eye') ??
+        skeleton.findBone('control_handle_eye');
+    final controlParent = controlTarget?.getParent();
+    final rigOffset = controlParent == null
         ? offset
         : () {
-            final a = parent.worldToLocal(origin.dx, origin.dy);
-            final b = parent.worldToLocal(
+            final a = controlParent.worldToLocal(origin.dx, origin.dy);
+            final b = controlParent.worldToLocal(
               origin.dx + offset.dx,
               origin.dy + offset.dy,
             );
             return Offset(b.x - a.x, b.y - a.y);
           }();
-    target
-      ..setX(target.getX() + localOffset.dx * influence)
-      ..setY(target.getY() + localOffset.dy * influence);
+    var movedEyes = false;
+    for (final side in ['L', 'R']) {
+      final eye = skeleton.findBone('eyeball_$side');
+      final parent = eye?.getParent();
+      if (eye == null || parent == null) continue;
+      final a = parent.worldToLocal(origin.dx, origin.dy);
+      final b = parent.worldToLocal(
+        origin.dx + offset.dx,
+        origin.dy + offset.dy,
+      );
+      final localOffset = Offset(b.x - a.x, b.y - a.y);
+      eye
+        ..setX(eye.getX() + localOffset.dx * influence * 0.20)
+        ..setY(eye.getY() + localOffset.dy * influence * 0.20);
+      movedEyes = true;
+    }
+    if (!movedEyes && controlTarget != null) {
+      controlTarget
+        ..setX(controlTarget.getX() + rigOffset.dx * influence)
+        ..setY(controlTarget.getY() + rigOffset.dy * influence);
+    }
     for (final part in ['head', 'body']) {
       final aim = skeleton.findBone('control_aim_$part');
       final scale = part == 'head' ? 0.25 : 0.08;
       if (aim != null) {
         aim
-          ..setX(aim.getX() + localOffset.dx * influence * scale)
-          ..setY(aim.getY() + localOffset.dy * influence * scale);
+          ..setX(aim.getX() + rigOffset.dx * influence * scale)
+          ..setY(aim.getY() + rigOffset.dy * influence * scale);
       }
       final roll = skeleton.findBone(
         part == 'head' ? 'control_roll_head' : 'control_roll_body_upper',
@@ -1017,6 +1029,7 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void dispose() {
     _replyGeneration += 1;
+    _textFollowGeneration += 1;
     final replyIterator = _replyIterator;
     _replyIterator = null;
     if (replyIterator != null) unawaited(replyIterator.cancel());
@@ -1036,7 +1049,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _audioPlayer.dispose();
     _effectPlayer.dispose();
     _idleTimer?.cancel();
-    _tapLabelTimer?.cancel();
+    _tapReactionTimer?.cancel();
     _speechFallbackTimer?.cancel();
     _microMotionTimer?.cancel();
     _expressionRelaxTimer?.cancel();
@@ -1045,6 +1058,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _blinkRestoreTimer?.cancel();
 
     _inputController.dispose();
+    _scrollController.removeListener(_handleConversationScroll);
     _scrollController.dispose();
     super.dispose();
   }
@@ -1080,14 +1094,12 @@ class _ChatScreenState extends State<ChatScreen> {
         _tapReactionActive = false;
       }
     }
-    _tapLabelTimer?.cancel();
-    if (mounted) setState(() => _lastTappedPart = reaction.label);
-    _tapLabelTimer = Timer(const Duration(milliseconds: 1350), () {
+    _tapReactionTimer?.cancel();
+    _tapReactionTimer = Timer(const Duration(milliseconds: 1350), () {
       if (!mounted) return;
       _tapReactionActive = false;
       _applyExpression(_currentExpression);
       if (!_isCharacterSpeaking) _scheduleExpressionRelax();
-      setState(() => _lastTappedPart = null);
     });
     if (!widget.controller.voiceEnabled || _isReplying) return;
     await _audioPlayer.stop();
@@ -1098,12 +1110,18 @@ class _ChatScreenState extends State<ChatScreen> {
           reaction.localizedVoiceAsset(
             widget.controller.characterReplyLanguage,
             _random.nextInt(3) + 1,
+            asmr: widget.controller.asmrModeEnabled,
           ),
         ),
       );
     } on Object {
       await _audioPlayer.play(
-        AssetSource(reaction.voiceAsset(_random.nextInt(3) + 1)),
+        AssetSource(
+          reaction.voiceAsset(
+            _random.nextInt(3) + 1,
+            asmr: widget.controller.asmrModeEnabled,
+          ),
+        ),
       );
     }
   }
@@ -1164,6 +1182,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final isAutomatic = automaticPrompt != null;
 
     _cancelSpeechPlayback();
+    _cancelTextFollow();
 
     _inputController.clear();
     if (!isAutomatic) {
@@ -1186,6 +1205,7 @@ class _ChatScreenState extends State<ChatScreen> {
       if (!mounted || generation != _replyGeneration) return;
       final reply = widget.controller.demoReply(text);
       widget.controller.addAssistantMessage(reply);
+      _showLatestAssistantFromStartIfOverflow();
       await _playTtsIfConfigured(reply);
       if (mounted && generation == _replyGeneration) {
         setState(() {
@@ -1193,15 +1213,16 @@ class _ChatScreenState extends State<ChatScreen> {
           _isContinuing = false;
         });
       }
-      _scrollToBottom();
       return;
     }
 
-    final apiKey = await _secretStore.readOpenAiKey();
+    final apiKey = await _secretStore.readLlmKey(widget.controller.llmProvider);
     if (!mounted || generation != _replyGeneration) return;
     if (apiKey.isEmpty) {
       _stopSpeakingAnimation();
-      widget.controller.addAssistantMessage('请先在设置中填写 OpenAI 兼容接口的 API Key。');
+      widget.controller.addAssistantMessage(
+        '请先在设置中填写 ${widget.controller.llmProvider.label} 的 API Key。',
+      );
       if (mounted) {
         setState(() {
           _isReplying = false;
@@ -1216,14 +1237,15 @@ class _ChatScreenState extends State<ChatScreen> {
     try {
       RuntimeLog.instance.info(
         'AI',
-        '开始流式回复 model=${widget.controller.openAiModel}, '
+        '开始流式回复 provider=${widget.controller.llmProvider.name}, '
+            'model=${widget.controller.activeLlmModel}, '
             'agent=${widget.controller.agentEnabled}, attachments=${attachments.length}',
       );
       iterator = StreamIterator<String>(
         _aiClient.streamChat(
-          baseUrl: widget.controller.openAiBaseUrl,
+          baseUrl: widget.controller.activeLlmBaseUrl,
           apiKey: apiKey,
-          model: widget.controller.openAiModel,
+          model: widget.controller.activeLlmModel,
           systemPrompt: widget.controller.buildCharacterPrompt(),
           messages: widget.controller.recentMessages(
             pending: isAutomatic ? ChatMessage(text: text, isUser: true) : null,
@@ -1259,13 +1281,16 @@ class _ChatScreenState extends State<ChatScreen> {
       if (generation != _replyGeneration) return;
       final reply = widget.controller.messages.last.text;
       widget.controller.finishAssistantStream();
+      _showLatestAssistantFromStartIfOverflow();
       RuntimeLog.instance.info('AI', '流式回复完成，字符数=${reply.length}');
-      await _playTtsIfConfigured(reply);
-      if (generation != _replyGeneration) return;
       if (widget.controller.longTermMemoryEnabled &&
-          widget.controller.userMessageCount % 4 == 0) {
+          !isAutomatic &&
+          (widget.controller.userMessageCount % 4 == 0 ||
+              AppController.shouldRefreshMemoryImmediately(text))) {
         unawaited(_refreshLongTermMemory(apiKey));
       }
+      await _playTtsIfConfigured(reply);
+      if (generation != _replyGeneration) return;
     } on Object catch (error, stackTrace) {
       if (generation != _replyGeneration) return;
       RuntimeLog.instance.error('AI', error, stackTrace);
@@ -1279,9 +1304,103 @@ class _ChatScreenState extends State<ChatScreen> {
           _isReplying = false;
           _isContinuing = false;
         });
-        _scrollToBottom();
       }
     }
+  }
+
+  Future<void> _suggestUserReply() async {
+    if (_isReplying ||
+        _isSuggestingReply ||
+        widget.controller.messages.isEmpty) {
+      return;
+    }
+    if (widget.controller.suggestionUsesRemaining() <= 0) {
+      final remaining = widget.controller.suggestionTimeUntilNextRefresh();
+      final minutes = remaining.inMinutes;
+      final seconds = remaining.inSeconds.remainder(60);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '建议回复次数已用完，$minutes分${seconds.toString().padLeft(2, '0')}秒后恢复 1 次',
+          ),
+        ),
+      );
+      return;
+    }
+    if (!widget.controller.aiEnabled) {
+      if (!widget.controller.consumeSuggestionUse()) return;
+      final suggestion = widget.controller.interfaceLanguage.text(
+        '我还不太明白，可以换一种更简单的方式说明吗？',
+        'I am not quite sure how to answer that. Could you explain it more simply?',
+        'まだうまく答えられないから、もう少し分かりやすく説明してくれる？',
+      );
+      _replaceComposerText(suggestion);
+      return;
+    }
+    final apiKey = await _secretStore.readLlmKey(widget.controller.llmProvider);
+    if (!mounted) return;
+    if (apiKey.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '请先在设置中填写 ${widget.controller.llmProvider.label} 的 API Key。',
+          ),
+        ),
+      );
+      return;
+    }
+    if (!widget.controller.consumeSuggestionUse()) return;
+    setState(() => _isSuggestingReply = true);
+    final buffer = StringBuffer();
+    try {
+      await for (final delta in _aiClient.streamChat(
+        baseUrl: widget.controller.activeLlmBaseUrl,
+        apiKey: apiKey,
+        model: widget.controller.activeLlmModel,
+        systemPrompt: widget.controller.buildUserReplySuggestionPrompt(),
+        messages: widget.controller.recentMessages(limit: 12),
+        reasoningEffort:
+            widget.controller.openAiAdvancedEnabled &&
+                widget.controller.supportsOpenAiAdvancedControls
+            ? widget.controller.openAiReasoningEffort.name
+            : null,
+        outputMultiplier: null,
+        agentEnabled: false,
+      )) {
+        buffer.write(delta);
+      }
+      if (!mounted) return;
+      final suggestion = _cleanSuggestedReply(buffer.toString());
+      if (suggestion.isNotEmpty) _replaceComposerText(suggestion);
+    } on Object catch (error, stackTrace) {
+      RuntimeLog.instance.error('AI suggestion', error, stackTrace);
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('建议回复生成失败，请稍后重试')));
+      }
+    } finally {
+      if (mounted) setState(() => _isSuggestingReply = false);
+    }
+  }
+
+  String _cleanSuggestedReply(String value) {
+    var result = value
+        .replaceAll('```', '')
+        .replaceFirst(RegExp(r'^\s*(?:用户|你|User)\s*[：:]\s*'), '')
+        .trim();
+    if (result.length >= 2 &&
+        ((result.startsWith('“') && result.endsWith('”')) ||
+            (result.startsWith('"') && result.endsWith('"')))) {
+      result = result.substring(1, result.length - 1).trim();
+    }
+    return result;
+  }
+
+  void _replaceComposerText(String value) {
+    _inputController
+      ..text = value
+      ..selection = TextSelection.collapsed(offset: value.length);
+    setState(() => _manualPanelFraction = null);
   }
 
   void _continueConversation() {
@@ -1356,6 +1475,7 @@ class _ChatScreenState extends State<ChatScreen> {
       _startSpeakingAnimation();
       _applyPerformanceFromResponse(text);
       _scheduleSpeechFallback(text);
+      unawaited(_followTextResponse(text));
       return;
     }
     final segments = performanceSegmentsForAssistantResponse(
@@ -1364,6 +1484,7 @@ class _ChatScreenState extends State<ChatScreen> {
     );
     if (segments.isEmpty) {
       _stopSpeakingAnimation();
+      unawaited(_followTextResponse(text));
       return;
     }
     final apiKey = await _secretStore.readTtsKey(widget.controller.ttsProvider);
@@ -1385,6 +1506,7 @@ class _ChatScreenState extends State<ChatScreen> {
       _startSpeakingAnimation();
       _applyPerformanceFromResponse(text);
       _scheduleSpeechFallback(text);
+      unawaited(_followTextResponse(text));
       return;
     }
     final generation = ++_speechPlaybackGeneration;
@@ -1404,7 +1526,7 @@ class _ChatScreenState extends State<ChatScreen> {
       RuntimeLog.instance.info(
         'TTS',
         '开始合成 provider=${widget.controller.ttsProvider.label}, model=$model, '
-            'segments=${segments.length}, asmr=${widget.controller.asmrModeEnabled}, '
+            'segments=${segments.length}, voiceMode=${widget.controller.ttsVoiceMode.name}, '
             'emotion=${widget.controller.ttsEmotionIntensity.name}, '
             'cueDensity=${widget.controller.ttsCueDensity.name}, '
             'fishTemperature=${widget.controller.ttsEmotionIntensity.fishTemperature.toStringAsFixed(2)}',
@@ -1414,6 +1536,12 @@ class _ChatScreenState extends State<ChatScreen> {
         apiKey,
         generation,
       );
+      final displaySegments = parseAssistantSegments(text)
+          .where(
+            (segment) => displayTextForAssistantSegment(segment).isNotEmpty,
+          )
+          .toList(growable: false);
+      var nextDisplayIndex = 0;
       for (var index = 0; index < segments.length; index++) {
         final prepared = await pending;
         if (!mounted || generation != _speechPlaybackGeneration) {
@@ -1424,6 +1552,22 @@ class _ChatScreenState extends State<ChatScreen> {
             ? _prepareSpeech(segments[index + 1], apiKey, generation)
             : null;
         final segment = segments[index];
+        final displayIndex = _displayIndexForRyzaSegment(text, index);
+        if (displayIndex != null && displayIndex > nextDisplayIndex) {
+          await _holdUnvoicedSegments(
+            displaySegments,
+            nextDisplayIndex,
+            displayIndex,
+            generation,
+            cancellation,
+          );
+          if (generation != _speechPlaybackGeneration) return;
+        }
+        _showAssistantSegment(
+          displayIndex,
+          _readingDurationFor(segment.speechText),
+        );
+        if (displayIndex != null) nextDisplayIndex = displayIndex + 1;
         if (segment.expression case final expression?) {
           _applyExpression(expression);
         }
@@ -1455,12 +1599,22 @@ class _ChatScreenState extends State<ChatScreen> {
         _stopSpeakingAnimation();
         if (next != null) pending = next;
       }
+      if (nextDisplayIndex < displaySegments.length) {
+        await _holdUnvoicedSegments(
+          displaySegments,
+          nextDisplayIndex,
+          displaySegments.length,
+          generation,
+          cancellation,
+        );
+      }
       await _replaceLastSpeech(completedSegments);
       RuntimeLog.instance.info(
         'TTS',
         '合成与播放完成，分段数=${completedSegments.length}',
       );
       _stopSpeakingAnimation();
+      _showAssistantSegment(null, Duration.zero);
       if (identical(_speechCancellation, cancellation)) {
         _speechCancellation = null;
       }
@@ -1479,6 +1633,7 @@ class _ChatScreenState extends State<ChatScreen> {
       _startSpeakingAnimation();
       _applyPerformanceFromResponse(text);
       _scheduleSpeechFallback(text);
+      unawaited(_followTextResponse(text));
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -1495,8 +1650,9 @@ class _ChatScreenState extends State<ChatScreen> {
     String apiKey,
     int generation,
   ) async {
-    // WAV keeps the PCM samples available for deterministic lip sync. The
-    // format preference remains useful for the settings-page voice preview.
+    // Android MediaPlayer support for WAV varies by vendor. MP3 is used there
+    // for reliable playback; desktop keeps WAV for deterministic lip sync.
+    final playbackFormat = Platform.isAndroid ? 'mp3' : 'wav';
     final plainText = stripLeadingTtsCues(segment.speechText);
     final emotionIntensity = widget.controller.ttsEmotionIntensity;
     final path = await switch (widget.controller.ttsProvider) {
@@ -1504,9 +1660,10 @@ class _ChatScreenState extends State<ChatScreen> {
         apiKey: apiKey,
         referenceId: widget.controller.activeFishAudioReferenceId,
         model: widget.controller.fishAudioModel,
-        format: 'wav',
+        format: playbackFormat,
         latency: widget.controller.fishAudioLatency,
         speed: widget.controller.fishAudioSpeed,
+        baseUrl: widget.controller.fishAudioBaseUrl,
         temperature: emotionIntensity.fishTemperature,
         text: applyFishEmotionIntensityPerSentence(
           segment.speechText,
@@ -1536,7 +1693,7 @@ class _ChatScreenState extends State<ChatScreen> {
         baseUrl: widget.controller.genericTtsBaseUrl,
         model: widget.controller.genericTtsModel,
         voice: widget.controller.activeGenericTtsVoice,
-        format: 'wav',
+        format: playbackFormat,
         speed: widget.controller.fishAudioSpeed,
         instructions:
             widget.controller.genericTtsModel.toLowerCase().contains(
@@ -1553,6 +1710,11 @@ class _ChatScreenState extends State<ChatScreen> {
       throw const AiServiceException('语音播放已取消');
     }
     final bytes = await File(path).readAsBytes();
+    RuntimeLog.instance.info(
+      'TTS',
+      '音频文件已准备 provider=${widget.controller.ttsProvider.label}, '
+          'format=$playbackFormat, bytes=${bytes.length}, file=${path.split(Platform.pathSeparator).last}',
+    );
     return _PreparedSpeech(
       path: path,
       envelope: AudioAmplitudeEnvelope.tryParseWav(bytes),
@@ -1605,8 +1767,21 @@ class _ChatScreenState extends State<ChatScreen> {
     final cancellation = Completer<void>();
     _speechCancellation = cancellation;
     try {
-      for (final segment in segments) {
+      for (var index = 0; index < segments.length; index++) {
+        final segment = segments[index];
         if (generation != _speechPlaybackGeneration) return;
+        final latestResponse = widget.controller.messages
+            .where(
+              (message) => !message.isUser && message.text.trim().isNotEmpty,
+            )
+            .lastOrNull
+            ?.text;
+        if (latestResponse != null) {
+          _showAssistantSegment(
+            _displayIndexForRyzaSegment(latestResponse, index),
+            const Duration(seconds: 6),
+          );
+        }
         if (segment.expression case final expression?) {
           _applyExpression(expression);
         }
@@ -1632,6 +1807,7 @@ class _ChatScreenState extends State<ChatScreen> {
       await _clearLastSpeech();
     } finally {
       if (generation == _speechPlaybackGeneration) _stopSpeakingAnimation();
+      _showAssistantSegment(null, Duration.zero);
       if (identical(_speechCancellation, cancellation)) {
         _speechCancellation = null;
       }
@@ -1650,11 +1826,89 @@ class _ChatScreenState extends State<ChatScreen> {
       unawaited(_deleteTemporarySpeech(path));
     }
     if (_isCharacterSpeaking) _stopSpeakingAnimation();
+    _showAssistantSegment(null, Duration.zero);
+  }
+
+  Duration _readingDurationFor(String text) => Duration(
+    milliseconds: (stripLeadingTtsCues(text).length * 70)
+        .clamp(3000, 10000)
+        .toInt(),
+  );
+
+  Future<void> _holdUnvoicedSegments(
+    List<ChatSegment> segments,
+    int start,
+    int end,
+    int speechGeneration,
+    Completer<void> cancellation,
+  ) async {
+    for (var index = start; index < end; index++) {
+      if (!mounted || speechGeneration != _speechPlaybackGeneration) return;
+      final visible = displayTextForAssistantSegment(segments[index]);
+      final duration = Duration(
+        milliseconds: (visible.length * 55).clamp(5000, 10000).toInt(),
+      );
+      _showAssistantSegment(index, duration);
+      await Future.any([Future<void>.delayed(duration), cancellation.future]);
+    }
+  }
+
+  int? _displayIndexForRyzaSegment(String response, int ryzaOrdinal) {
+    var currentRyza = 0;
+    final segments = parseAssistantSegments(response)
+        .where((segment) => displayTextForAssistantSegment(segment).isNotEmpty);
+    var displayIndex = 0;
+    for (final segment in segments) {
+      if (segment.speaker == ChatSpeaker.ryza) {
+        if (currentRyza == ryzaOrdinal) return displayIndex;
+        currentRyza += 1;
+      }
+      displayIndex += 1;
+    }
+    return null;
+  }
+
+  void _showAssistantSegment(int? index, Duration duration) {
+    if (!mounted ||
+        (_activeAssistantSegmentIndex == index &&
+            _activeSegmentDisplayDuration == duration)) {
+      return;
+    }
+    setState(() {
+      _activeAssistantSegmentIndex = index;
+      _activeSegmentDisplayDuration = duration;
+    });
+  }
+
+  void _cancelTextFollow() {
+    _textFollowGeneration += 1;
+    _showAssistantSegment(null, Duration.zero);
+  }
+
+  Future<void> _followTextResponse(String response) async {
+    final generation = ++_textFollowGeneration;
+    final segments = parseAssistantSegments(response)
+        .where((segment) => displayTextForAssistantSegment(segment).isNotEmpty)
+        .toList(growable: false);
+    if (segments.isEmpty) return;
+    await Future<void>.delayed(const Duration(milliseconds: 350));
+    for (var index = 0; index < segments.length; index++) {
+      if (!mounted || generation != _textFollowGeneration) return;
+      final visibleLength = displayTextForAssistantSegment(segments[index])
+          .length;
+      final segmentMs = (visibleLength * 55).clamp(5000, 10000).toInt();
+      final duration = Duration(milliseconds: segmentMs);
+      _showAssistantSegment(index, duration);
+      await Future<void>.delayed(duration);
+    }
+    if (mounted && generation == _textFollowGeneration) {
+      _showAssistantSegment(null, Duration.zero);
+    }
   }
 
   void _scheduleSpeechFallback(String text) {
     final visibleLength = displayTextForAssistantResponse(text).length;
-    final durationMs = (visibleLength * 55).clamp(900, 4200).toInt();
+    final durationMs = (visibleLength * 55).clamp(5000, 10000).toInt();
     _speechFallbackTimer?.cancel();
     _speechFallbackTimer = Timer(Duration(milliseconds: durationMs), () {
       if (mounted) _stopSpeakingAnimation();
@@ -1671,14 +1925,19 @@ class _ChatScreenState extends State<ChatScreen> {
         )
         .join('\n');
     try {
-      final memory = await _aiClient.complete(
-        baseUrl: widget.controller.openAiBaseUrl,
+      final now = DateTime.now();
+      final memoryCandidate = await _aiClient.complete(
+        baseUrl: widget.controller.activeLlmBaseUrl,
         apiKey: apiKey,
-        model: widget.controller.openAiModel,
+        model: widget.controller.activeLlmModel,
         messages: [
           {
             'role': 'system',
-            'content': '把对话按情况整理为500-1000字，最多不超过1500字的长期记忆。只保留用户稳定偏好、重要经历、关系变化和未完成约定。不要编造。直接输出中文记忆。',
+            'content':
+                '''你负责维护有限、可靠的长期记忆。当前本地时间为 ${now.toIso8601String()}，时区为 Asia/Shanghai (UTC+8)。
+只输出 JSON，不要 Markdown 或解释。格式：{"updated_at":"ISO-8601","entries":[{"date":"YYYY-MM-DD","category":"类别","importance":1,"summary":"简洁事实","status":"active","keywords":["关键词"]}]}。
+合并旧记忆与近期对话并去重，同一事件更新原条目，不重复新增。只保留稳定偏好、重要经历、关系变化、未完成约定和未来确有价值的信息；普通寒暄、一次性客套、重复信息和无后续价值内容应删除。最多 40 条。
+importance 使用 1-5。誓言/承诺用 promise，告白用 confession，严重或深刻伤害用 deep_hurt，关系转折用 relationship_turning_point，重大人生事件用 major_life_event；这些类别必须设为 5，除非近期对话明确撤回、澄清或解决，否则严禁删除。不要编造日期或细节；近期新事件日期默认使用 ${now.year.toString().padLeft(4, '0')}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}。''',
           },
           {
             'role': 'user',
@@ -1687,8 +1946,18 @@ class _ChatScreenState extends State<ChatScreen> {
           },
         ],
       );
-      widget.controller.updateMemorySummary(memory);
-    } on Object {
+      final memory = AppController.normalizeLongTermMemoryCandidate(
+        memoryCandidate,
+        previousMemory: widget.controller.memorySummary,
+        now: now,
+      );
+      if (memory != null) {
+        widget.controller.updateMemorySummary(memory);
+      } else {
+        RuntimeLog.instance.warning('Memory', '长期记忆整理返回了无效 JSON，已保留旧记忆');
+      }
+    } on Object catch (error, stackTrace) {
+      RuntimeLog.instance.error('Memory', error, stackTrace);
       // Memory consolidation is best-effort and must not break normal chat.
     }
   }
@@ -1701,6 +1970,33 @@ class _ChatScreenState extends State<ChatScreen> {
         target,
         duration: const Duration(milliseconds: 260),
         curve: Curves.easeOut,
+      );
+    });
+  }
+
+  void _handleConversationScroll() {
+    if (!_scrollController.hasClients) return;
+    final position = _scrollController.position;
+    final shouldShow = position.pixels > position.minScrollExtent + 12;
+    if (shouldShow == _showScrollToBottomIndicator || !mounted) return;
+    setState(() => _showScrollToBottomIndicator = shouldShow);
+  }
+
+  void _showLatestAssistantFromStartIfOverflow() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final context = _latestAssistantMessageKey.currentContext;
+      if (!mounted || context == null || !_scrollController.hasClients) return;
+      final renderBox = context.findRenderObject() as RenderBox?;
+      if (renderBox == null ||
+          renderBox.size.height <=
+              _scrollController.position.viewportDimension - 12) {
+        return;
+      }
+      Scrollable.ensureVisible(
+        context,
+        alignment: 0.04,
+        duration: const Duration(milliseconds: 320),
+        curve: Curves.easeOutCubic,
       );
     });
   }
@@ -1792,62 +2088,66 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  void _showAttachmentPicker() {
+  Future<void> _takePhoto() async {
     if (_isReplying) return;
-    showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: const Color(0xFFF8F6F1),
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
-      builder: (sheetContext) => SafeArea(
-        top: false,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(12, 12, 12, 18),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              ListTile(
-                leading: const Icon(Icons.image_outlined),
-                title: Text(
-                  widget.controller.interfaceLanguage.text(
-                    '发送图片',
-                    'Send image',
-                    '画像を送信',
-                  ),
-                ),
-                subtitle: const Text('JPG, PNG, WebP, GIF'),
-                onTap: () {
-                  Navigator.pop(sheetContext);
-                  _pickAttachments(imagesOnly: true);
-                },
-              ),
-              ListTile(
-                leading: const Icon(Icons.description_outlined),
-                title: Text(
-                  widget.controller.interfaceLanguage.text(
-                    '发送文件',
-                    'Send file',
-                    'ファイルを送信',
-                  ),
-                ),
-                subtitle: Text(
-                  widget.controller.interfaceLanguage.text(
-                    'PDF、Office、文本和表格文件',
-                    'PDF, Office, text and spreadsheet files',
-                    'PDF、Office、テキスト、表計算ファイル',
-                  ),
-                ),
-                onTap: () {
-                  Navigator.pop(sheetContext);
-                  _pickAttachments(imagesOnly: false);
-                },
-              ),
-            ],
+    if (!Platform.isAndroid && !Platform.isIOS) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('当前平台暂不支持直接拍照，请选择已有图片')));
+      return;
+    }
+    var status = await Permission.camera.status;
+    if (!status.isGranted) status = await Permission.camera.request();
+    if (!status.isGranted) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            status.isPermanentlyDenied
+                ? '相机权限已被禁止，请在系统设置中开启后重试'
+                : '未授予相机权限，无法拍照',
           ),
         ),
-      ),
-    );
+      );
+      return;
+    }
+    try {
+      final photo = await ImagePicker().pickImage(
+        source: ImageSource.camera,
+        imageQuality: 92,
+        requestFullMetadata: false,
+      );
+      if (photo == null || !mounted) return;
+      final size = await photo.length();
+      final currentTotal = _pendingAttachments.fold<int>(
+        0,
+        (total, attachment) => total + attachment.size,
+      );
+      if (size > 10 * 1024 * 1024 || currentTotal + size > 10 * 1024 * 1024) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('照片或本次附件总大小超过 10MB')));
+        return;
+      }
+      final bytes = await photo.readAsBytes();
+      if (!mounted) return;
+      setState(() {
+        _pendingAttachments.add(
+          ChatAttachment(
+            name: photo.name.isEmpty ? 'camera.jpg' : photo.name,
+            mimeType: _mimeTypeForFile(
+              photo.name.isEmpty ? 'camera.jpg' : photo.name,
+            ),
+            size: bytes.length,
+            bytes: bytes,
+          ),
+        );
+      });
+    } on Object catch (error, stackTrace) {
+      RuntimeLog.instance.error('Camera', error, stackTrace);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('拍照失败，请重试或从相册选择图片')));
+    }
   }
 
   Future<void> _pickAttachments({required bool imagesOnly}) async {
@@ -2061,16 +2361,15 @@ class _ChatScreenState extends State<ChatScreen> {
       children: [
         Column(
           children: [
-            _TopBar(
-              language: widget.controller.interfaceLanguage,
-              liquidGlass: liquidGlass,
-              sceneTime: widget.controller.sceneTime,
-              onSceneChanged: widget.controller.setSceneTime,
-              onMenuPressed: widget.onMenuPressed,
-              onStatusPressed: _showCharacterStatus,
-              asmrModeEnabled: widget.controller.asmrModeEnabled,
-              onAsmrPressed: _toggleAsmrMode,
-            ),
+            if (!widget.hideUi)
+              _TopBar(
+                language: widget.controller.interfaceLanguage,
+                liquidGlass: liquidGlass,
+                sceneTime: widget.controller.sceneTime,
+                onSceneChanged: widget.controller.setSceneTime,
+                onMenuPressed: widget.onMenuPressed,
+                onStatusPressed: _showCharacterStatus,
+              ),
             Expanded(
               child: ConstrainedBox(
                 constraints: const BoxConstraints(maxWidth: 1120),
@@ -2079,51 +2378,69 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
           ],
         ),
-        AnimatedPositioned(
-          duration: const Duration(milliseconds: 480),
-          curve: Curves.easeOutBack,
-          right: isWide ? 18 : 10,
-          bottom: 8 + keyboardInset,
-          width: panelWidth,
-          height: panelHeight,
-          child: _LiquidGlassConversation(
-            language: widget.controller.interfaceLanguage,
-            liquidGlass: liquidGlass,
-            messages: widget.controller.messages,
-            isReplying: _isReplying,
-            scrollController: _scrollController,
-            inputController: _inputController,
-            showMicrophone: widget.controller.showMicrophoneButton,
-            attachments: _pendingAttachments,
-            onAddAttachment: _showAttachmentPicker,
-            onRemoveAttachment: (attachment) {
-              setState(() => _pendingAttachments.remove(attachment));
-            },
-            onSubmitted: (_) => _sendMessage(),
-            onSend: _sendMessage,
-            onCancel: _cancelReply,
-            canUndo: widget.controller.messages.any(
-              (message) => message.isUser,
+        if (!widget.hideUi)
+          AnimatedPositioned(
+            duration: const Duration(milliseconds: 480),
+            curve: Curves.easeOutBack,
+            right: isWide ? 18 : 10,
+            bottom: 8 + keyboardInset,
+            width: panelWidth,
+            height: panelHeight,
+            child: _LiquidGlassConversation(
+              language: widget.controller.interfaceLanguage,
+              liquidGlass: liquidGlass,
+              messages: widget.controller.messages,
+              isReplying: _isReplying,
+              scrollController: _scrollController,
+              inputController: _inputController,
+              showMicrophone: widget.controller.showMicrophoneButton,
+              attachments: _pendingAttachments,
+              onTakePhoto: _takePhoto,
+              onPickImage: () => _pickAttachments(imagesOnly: true),
+              onPickFile: () => _pickAttachments(imagesOnly: false),
+              onRemoveAttachment: (attachment) {
+                setState(() => _pendingAttachments.remove(attachment));
+              },
+              onSubmitted: (_) => _sendMessage(),
+              onSend: _sendMessage,
+              onCancel: _cancelReply,
+              canUndo: widget.controller.messages.any(
+                (message) => message.isUser,
+              ),
+              canReplay: _lastSpeech.isNotEmpty && !_isReplying,
+              canContinue:
+                  widget.controller.messages.any(
+                    (message) => !message.isUser,
+                  ) &&
+                  !_isReplying,
+              isContinuing: _isContinuing,
+              isSuggestingReply: _isSuggestingReply,
+              suggestionUsesRemaining: widget.controller
+                  .suggestionUsesRemaining(),
+              suggestionRefreshProgress: widget.controller
+                  .suggestionRefreshProgress(),
+              suggestionRefreshWait: widget.controller
+                  .suggestionTimeUntilNextRefresh(),
+              activeAssistantSegmentIndex: _activeAssistantSegmentIndex,
+              activeSegmentDisplayDuration: _activeSegmentDisplayDuration,
+              latestAssistantMessageKey: _latestAssistantMessageKey,
+              showScrollToBottomIndicator: _showScrollToBottomIndicator,
+              onScrollToBottom: _scrollToBottom,
+              onSuggestReply: _suggestUserReply,
+              onUndo: _undoLastMessage,
+              onReplay: _replayLastSpeech,
+              onContinue: _continueConversation,
+              onDragUpdate: (delta) {
+                setState(() {
+                  _manualPanelFraction =
+                      (panelFraction - delta / constraints.maxHeight).clamp(
+                        0.22,
+                        0.68,
+                      );
+                });
+              },
             ),
-            canReplay: _lastSpeech.isNotEmpty && !_isReplying,
-            canContinue:
-                widget.controller.messages.any((message) => !message.isUser) &&
-                !_isReplying,
-            isContinuing: _isContinuing,
-            onUndo: _undoLastMessage,
-            onReplay: _replayLastSpeech,
-            onContinue: _continueConversation,
-            onDragUpdate: (delta) {
-              setState(() {
-                _manualPanelFraction =
-                    (panelFraction - delta / constraints.maxHeight).clamp(
-                      0.22,
-                      0.68,
-                    );
-              });
-            },
           ),
-        ),
       ],
     );
   }
@@ -2158,6 +2475,7 @@ class _ChatScreenState extends State<ChatScreen> {
   Widget _buildCharacter() {
     return Stack(
       fit: StackFit.expand,
+      clipBehavior: Clip.none,
       children: [
         CharacterCamera(
           onTap: _reactToTap,
@@ -2165,8 +2483,26 @@ class _ChatScreenState extends State<ChatScreen> {
               ? _updateGaze
               : null,
           onGazeEnd: widget.controller.gazeTrackingEnabled ? _endGaze : null,
-          child: _appearance.animated
-              ? SpineWidget.fromAsset(
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              if (_appearance.id == 'seated_01')
+                Positioned.fill(
+                  child: IgnorePointer(
+                    child: Transform.translate(
+                      offset: const Offset(0, -204),
+                      child: SpineWidget.fromAsset(
+                        'assets/spine/objects/obj_001/obj_001.atlas',
+                        'assets/spine/objects/obj_001/obj_001.skel',
+                        _seatObjectController,
+                        fit: BoxFit.contain,
+                        alignment: Alignment.bottomCenter,
+                      ),
+                    ),
+                  ),
+                ),
+              if (_appearance.animated)
+                SpineWidget.fromAsset(
                   _appearance.atlasAsset,
                   _appearance.skeletonAsset,
                   _spineController!,
@@ -2174,7 +2510,8 @@ class _ChatScreenState extends State<ChatScreen> {
                   fit: BoxFit.contain,
                   alignment: Alignment.bottomCenter,
                 )
-              : Padding(
+              else
+                Padding(
                   padding: const EdgeInsets.fromLTRB(12, 28, 12, 0),
                   child: Image.asset(
                     _appearance.previewAsset,
@@ -2183,39 +2520,36 @@ class _ChatScreenState extends State<ChatScreen> {
                     filterQuality: FilterQuality.high,
                   ),
                 ),
+            ],
+          ),
         ),
         if (_appearance.animated && !_spineReady)
           const Center(child: CircularProgressIndicator.adaptive()),
-        Positioned(
-          left: 16,
-          bottom: 10,
-          child: _CharacterLabel(
-            liquidGlass: widget.controller.liquidGlassChatUi,
-          ),
-        ),
-        Positioned(
-          right: 16,
-          top: 10,
-          child: _CharacterToolCluster(
-            liquidGlass: widget.controller.liquidGlassChatUi,
-            expanded: _characterToolsExpanded,
-            onToggle: () => setState(
-              () => _characterToolsExpanded = !_characterToolsExpanded,
-            ),
-            onMotionPressed: _showMotionPicker,
-            onAppearancePressed: _showAppearancePicker,
-          ),
-        ),
-        if (_lastTappedPart case final part?)
+        if (!widget.hideUi)
           Positioned(
-            right: 16,
-            bottom: 10,
-            child: _TapResultLabel(
-              part: part,
+            right: 12,
+            top: 10,
+            child: _TtsVoiceModeMenu(
               liquidGlass: widget.controller.liquidGlassChatUi,
+              currentMode: widget.controller.ttsVoiceMode,
+              onModeSelected: _selectTtsVoiceMode,
             ),
           ),
-        if (!_appearance.animated)
+        if (!widget.hideUi)
+          Positioned(
+            right: 12,
+            top: 68,
+            child: _CharacterToolCluster(
+              liquidGlass: widget.controller.liquidGlassChatUi,
+              expanded: _characterToolsExpanded,
+              onToggle: () => setState(
+                () => _characterToolsExpanded = !_characterToolsExpanded,
+              ),
+              onMotionPressed: _showMotionPicker,
+              onAppearancePressed: _showAppearancePicker,
+            ),
+          ),
+        if (!widget.hideUi && !_appearance.animated)
           Positioned(
             right: 16,
             bottom: 10,
@@ -2227,31 +2561,78 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  void _toggleAsmrMode() {
-    final nextValue = !widget.controller.asmrModeEnabled;
-    if (nextValue && !widget.controller.hasAsmrVoiceForCurrentProvider) {
+  void _selectTtsVoiceMode(TtsVoiceMode mode) {
+    if (!widget.controller.setTtsVoiceMode(mode)) {
+      final idName = switch (mode) {
+        TtsVoiceMode.normal => '普通 Voice model ID',
+        TtsVoiceMode.asmr => 'ASMR 模式 Voice model ID',
+      };
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            '请先在 ${widget.controller.ttsProvider.label} 设置中填写 ASMR 音色 ID',
+            '请先在 ${widget.controller.ttsProvider.label} 设置中填写$idName',
           ),
         ),
       );
-      return;
     }
-    widget.controller.setAsmrModeEnabled(nextValue);
   }
 }
 
-class _SceneBackground extends StatelessWidget {
+class _SceneBackground extends StatefulWidget {
   const _SceneBackground({required this.sceneTime, required this.stageId});
 
   final SceneTime sceneTime;
   final String stageId;
 
   @override
+  State<_SceneBackground> createState() => _SceneBackgroundState();
+}
+
+class _SceneBackgroundState extends State<_SceneBackground> {
+  late String _activeSceneId;
+  String? _incomingSceneId;
+  bool _incomingVisible = false;
+
+  String get _targetSceneId =>
+      StageEnvironmentCatalog.sceneAssetIdFor(widget.stageId, widget.sceneTime);
+
+  @override
+  void initState() {
+    super.initState();
+    _activeSceneId = _targetSceneId;
+  }
+
+  @override
+  void didUpdateWidget(covariant _SceneBackground oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final target = _targetSceneId;
+    if (target == _activeSceneId) {
+      _incomingSceneId = null;
+      _incomingVisible = false;
+    } else if (target != _incomingSceneId) {
+      _incomingSceneId = target;
+      _incomingVisible = false;
+    }
+  }
+
+  void _showIncoming(String sceneId) {
+    if (!mounted || sceneId != _incomingSceneId) return;
+    setState(() => _incomingVisible = true);
+  }
+
+  void _finishTransition() {
+    final incoming = _incomingSceneId;
+    if (!mounted || incoming == null || !_incomingVisible) return;
+    setState(() {
+      _activeSceneId = incoming;
+      _incomingSceneId = null;
+      _incomingVisible = false;
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final overlay = switch (sceneTime) {
+    final overlay = switch (widget.sceneTime) {
       SceneTime.morning => const Color(0x1AFFD28A),
       SceneTime.afternoon => const Color(0x0AFFFFFF),
       SceneTime.evening => const Color(0x33B75B3D),
@@ -2262,11 +2643,24 @@ class _SceneBackground extends StatelessWidget {
       fit: StackFit.expand,
       children: [
         Image.asset('assets/images/talk_background.png', fit: BoxFit.cover),
-        _SceneSpineLayer(
-          key: ValueKey('$stageId-${sceneTime.name}'),
-          sceneTime: sceneTime,
-          stageId: stageId,
+        AnimatedOpacity(
+          key: ValueKey('scene-$_activeSceneId'),
+          opacity: 1,
+          duration: const Duration(milliseconds: 280),
+          child: _SceneSpineLayer(sceneId: _activeSceneId),
         ),
+        if (_incomingSceneId case final incoming?)
+          AnimatedOpacity(
+            key: ValueKey('scene-$incoming'),
+            opacity: _incomingVisible ? 1 : 0,
+            duration: const Duration(milliseconds: 280),
+            curve: Curves.easeOutCubic,
+            onEnd: _finishTransition,
+            child: _SceneSpineLayer(
+              sceneId: incoming,
+              onReady: () => _showIncoming(incoming),
+            ),
+          ),
         ColoredBox(color: overlay),
         DecoratedBox(
           decoration: BoxDecoration(
@@ -2284,37 +2678,44 @@ class _SceneBackground extends StatelessWidget {
 }
 
 class _SceneSpineLayer extends StatefulWidget {
-  const _SceneSpineLayer({
-    super.key,
-    required this.sceneTime,
-    required this.stageId,
-  });
+  const _SceneSpineLayer({required this.sceneId, this.onReady});
 
-  final SceneTime sceneTime;
-  final String stageId;
+  final String sceneId;
+  final VoidCallback? onReady;
 
   @override
   State<_SceneSpineLayer> createState() => _SceneSpineLayerState();
 }
 
 class _SceneSpineLayerState extends State<_SceneSpineLayer> {
-  late final SpineWidgetController _controller = SpineWidgetController();
+  late final SpineWidgetController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = SpineWidgetController(
+      onInitialized: (_) {
+        if (!mounted) return;
+        widget.onReady?.call();
+      },
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
-    final sceneId = StageEnvironmentCatalog.sceneAssetIdFor(
-      widget.stageId,
-      widget.sceneTime,
-    );
     final root = 'assets/scenes_runtime';
     return IgnorePointer(
-      child: SpineWidget.fromAsset(
-        '$root/$sceneId.atlas',
-        '$root/$sceneId.skel',
-        _controller,
-        key: ValueKey(sceneId),
-        fit: BoxFit.cover,
-        boundsProvider: const SceneBackdropBounds(),
+      child: Transform.scale(
+        scale: 1.28,
+        alignment: Alignment.topCenter,
+        child: SpineWidget.fromAsset(
+          '$root/${widget.sceneId}.atlas',
+          '$root/${widget.sceneId}.skel',
+          _controller,
+          key: ValueKey(widget.sceneId),
+          fit: BoxFit.cover,
+          boundsProvider: const SceneBackdropBounds(),
+        ),
       ),
     );
   }
@@ -2328,8 +2729,6 @@ class _TopBar extends StatelessWidget {
     required this.onSceneChanged,
     required this.onMenuPressed,
     required this.onStatusPressed,
-    required this.asmrModeEnabled,
-    required this.onAsmrPressed,
   });
 
   final AppLanguage language;
@@ -2338,85 +2737,6 @@ class _TopBar extends StatelessWidget {
   final ValueChanged<SceneTime> onSceneChanged;
   final VoidCallback onMenuPressed;
   final VoidCallback onStatusPressed;
-  final bool asmrModeEnabled;
-  final VoidCallback onAsmrPressed;
-
-  Future<void> _showSceneTimeMenu(BuildContext context) async {
-    final selected = await showDialog<SceneTime>(
-      context: context,
-      barrierColor: Colors.black38,
-      builder: (dialogContext) => Dialog(
-        backgroundColor: Colors.transparent,
-        surfaceTintColor: Colors.transparent,
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 320),
-          child: GlassSurface(
-            liquidGlass: liquidGlass,
-            fallbackColor: const Color(0xD9201D1B),
-            boxShadow: const [
-              BoxShadow(
-                color: Color(0x55000000),
-                blurRadius: 28,
-                offset: Offset(0, 12),
-              ),
-            ],
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(10, 12, 10, 10),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(10, 4, 4, 8),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            language.text(
-                              '切换场景时间',
-                              'Change scene time',
-                              'シーンの時間を変更',
-                            ),
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 17,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                        ),
-                        IconButton(
-                          onPressed: () => Navigator.pop(dialogContext),
-                          tooltip: language.text('关闭', 'Close', '閉じる'),
-                          color: Colors.white,
-                          icon: const Icon(Icons.close_rounded),
-                        ),
-                      ],
-                    ),
-                  ),
-                  for (final value in SceneTime.values)
-                    _GlassPickerTile(
-                      liquidGlass: liquidGlass,
-                      leading: Icon(value.icon, color: Colors.white),
-                      title: Text(
-                        value.label,
-                        style: const TextStyle(color: Colors.white),
-                      ),
-                      trailing: value == sceneTime
-                          ? const Icon(
-                              Icons.check_circle_rounded,
-                              color: Colors.white,
-                            )
-                          : null,
-                      onTap: () => Navigator.pop(dialogContext, value),
-                    ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-    if (selected != null) onSceneChanged(selected);
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -2424,51 +2744,13 @@ class _TopBar extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
       child: Row(
         children: [
-          _RoundIcon(
+          const SizedBox(width: 58),
+          const Spacer(),
+          _SceneTimeMenu(
             liquidGlass: liquidGlass,
-            icon: Icons.menu_rounded,
-            tooltip: language.text('菜单', 'Menu', 'メニュー'),
-            onPressed: onMenuPressed,
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  language.text('莱莎', 'Ryza', 'ライザ'),
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 20,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                Text(
-                  language.text(
-                    '在线 · 本地原型',
-                    'Online · Local prototype',
-                    'オンライン · ローカル版',
-                  ),
-                  style: const TextStyle(color: Colors.white70, fontSize: 12),
-                ),
-              ],
-            ),
-          ),
-          Tooltip(
-            message: language.text('切换场景时间', 'Change scene time', 'シーンの時間を変更'),
-            child: Semantics(
-              button: true,
-              label: language.text('切换场景时间', 'Change scene time', 'シーンの時間を変更'),
-              child: InkWell(
-                borderRadius: BorderRadius.circular(22),
-                onTap: () => _showSceneTimeMenu(context),
-                child: _StatusPill(
-                  liquidGlass: liquidGlass,
-                  icon: sceneTime.icon,
-                  label: sceneTime.label,
-                ),
-              ),
-            ),
+            language: language,
+            sceneTime: sceneTime,
+            onSceneChanged: onSceneChanged,
           ),
           const SizedBox(width: 8),
           _RoundIcon(
@@ -2477,18 +2759,381 @@ class _TopBar extends StatelessWidget {
             tooltip: language.text('角色状态', 'Character status', 'キャラクター状態'),
             onPressed: onStatusPressed,
           ),
-          const SizedBox(width: 8),
-          _RoundIcon(
-            liquidGlass: liquidGlass,
-            icon: asmrModeEnabled
-                ? Icons.headphones_rounded
-                : Icons.headphones_outlined,
-            tooltip: asmrModeEnabled
-                ? language.text('关闭 ASMR 模式', 'Disable ASMR mode', 'ASMRモードをオフ')
-                : language.text('开启 ASMR 模式', 'Enable ASMR mode', 'ASMRモードをオン'),
-            onPressed: onAsmrPressed,
+        ],
+      ),
+    );
+  }
+}
+
+class _TtsVoiceModeMenu extends StatefulWidget {
+  const _TtsVoiceModeMenu({
+    required this.liquidGlass,
+    required this.currentMode,
+    required this.onModeSelected,
+  });
+
+  final bool liquidGlass;
+  final TtsVoiceMode currentMode;
+  final ValueChanged<TtsVoiceMode> onModeSelected;
+
+  @override
+  State<_TtsVoiceModeMenu> createState() => _TtsVoiceModeMenuState();
+}
+
+class _TtsVoiceModeMenuState extends State<_TtsVoiceModeMenu> {
+  final LayerLink _layerLink = LayerLink();
+  OverlayEntry? _overlayEntry;
+
+  bool get _expanded => _overlayEntry != null;
+
+  IconData _iconForMode(TtsVoiceMode mode) => switch (mode) {
+    TtsVoiceMode.normal => Icons.volume_up_rounded,
+    TtsVoiceMode.asmr => Icons.headphones_rounded,
+  };
+
+  void _select(TtsVoiceMode mode) {
+    _closeMenu();
+    widget.onModeSelected(mode);
+  }
+
+  void _toggleMenu() {
+    if (_expanded) {
+      _closeMenu();
+      return;
+    }
+    final overlay = Overlay.of(context);
+    _overlayEntry = OverlayEntry(
+      builder: (context) => Stack(
+        children: [
+          Positioned.fill(
+            child: GestureDetector(
+              behavior: HitTestBehavior.translucent,
+              onTap: _closeMenu,
+            ),
+          ),
+          CompositedTransformFollower(
+            link: _layerLink,
+            showWhenUnlinked: false,
+            targetAnchor: Alignment.topLeft,
+            followerAnchor: Alignment.topRight,
+            offset: const Offset(-8, 0),
+            child: Material(
+              type: MaterialType.transparency,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  for (
+                    var index = 0;
+                    index < TtsVoiceMode.values.length;
+                    index++
+                  ) ...[
+                    if (index > 0) const SizedBox(height: 6),
+                    _VoiceModeOptionPill(
+                      liquidGlass: widget.liquidGlass,
+                      icon: _iconForMode(TtsVoiceMode.values[index]),
+                      label: TtsVoiceMode.values[index].label,
+                      selected:
+                          TtsVoiceMode.values[index] == widget.currentMode,
+                      onPressed: () => _select(TtsVoiceMode.values[index]),
+                    ),
+                  ],
+                ],
+              ),
+            ),
           ),
         ],
+      ),
+    );
+    overlay.insert(_overlayEntry!);
+    setState(() {});
+  }
+
+  void _closeMenu() {
+    _overlayEntry?.remove();
+    _overlayEntry = null;
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    _overlayEntry?.remove();
+    _overlayEntry = null;
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return CompositedTransformTarget(
+      link: _layerLink,
+      child: GlassIconButton(
+        liquidGlass: widget.liquidGlass,
+        size: 48,
+        icon: _expanded
+            ? Icons.close_rounded
+            : _iconForMode(widget.currentMode),
+        tooltip: _expanded ? '收起语音模式' : widget.currentMode.label,
+        onPressed: _toggleMenu,
+      ),
+    );
+  }
+}
+
+class _SceneTimeMenu extends StatefulWidget {
+  const _SceneTimeMenu({
+    required this.liquidGlass,
+    required this.language,
+    required this.sceneTime,
+    required this.onSceneChanged,
+  });
+
+  final bool liquidGlass;
+  final AppLanguage language;
+  final SceneTime sceneTime;
+  final ValueChanged<SceneTime> onSceneChanged;
+
+  @override
+  State<_SceneTimeMenu> createState() => _SceneTimeMenuState();
+}
+
+class _SceneTimeMenuState extends State<_SceneTimeMenu> {
+  final LayerLink _layerLink = LayerLink();
+  OverlayEntry? _overlayEntry;
+
+  bool get _expanded => _overlayEntry != null;
+
+  void _select(SceneTime value) {
+    _closeMenu();
+    widget.onSceneChanged(value);
+  }
+
+  void _toggleMenu() {
+    if (_expanded) {
+      _closeMenu();
+      return;
+    }
+    final reversedTimes = SceneTime.values.reversed.toList(growable: false);
+    final overlay = Overlay.of(context);
+    _overlayEntry = OverlayEntry(
+      builder: (context) => Stack(
+        children: [
+          Positioned.fill(
+            child: GestureDetector(
+              behavior: HitTestBehavior.translucent,
+              onTap: _closeMenu,
+            ),
+          ),
+          CompositedTransformFollower(
+            link: _layerLink,
+            showWhenUnlinked: false,
+            targetAnchor: Alignment.bottomRight,
+            followerAnchor: Alignment.topRight,
+            offset: const Offset(0, 6),
+            child: Material(
+              type: MaterialType.transparency,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  for (
+                    var index = 0;
+                    index < reversedTimes.length;
+                    index++
+                  ) ...[
+                    if (index > 0) const SizedBox(height: 6),
+                    _TimeOptionPill(
+                      liquidGlass: widget.liquidGlass,
+                      icon: reversedTimes[index].icon,
+                      label: reversedTimes[index].label,
+                      selected: reversedTimes[index] == widget.sceneTime,
+                      tooltip: widget.language.text(
+                        '切换到${reversedTimes[index].label}',
+                        'Switch to ${reversedTimes[index].label}',
+                        '「${reversedTimes[index].label}」へ切り替え',
+                      ),
+                      onPressed: () => _select(reversedTimes[index]),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+    overlay.insert(_overlayEntry!);
+    setState(() {});
+  }
+
+  void _closeMenu() {
+    _overlayEntry?.remove();
+    _overlayEntry = null;
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    _overlayEntry?.remove();
+    _overlayEntry = null;
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return CompositedTransformTarget(
+      link: _layerLink,
+      child: Semantics(
+        button: true,
+        label: widget.language.text('切换场景时间', 'Change scene time', 'シーンの時間を変更'),
+        child: GlassSurface(
+          liquidGlass: widget.liquidGlass,
+          borderRadius: BorderRadius.circular(21),
+          fallbackColor: Colors.black.withValues(alpha: 0.38),
+          child: SizedBox(
+            height: 42,
+            child: InkWell(
+              borderRadius: BorderRadius.circular(21),
+              onTap: _toggleMenu,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      _expanded ? Icons.close_rounded : widget.sceneTime.icon,
+                      color: Colors.white,
+                      size: 18,
+                    ),
+                    const SizedBox(width: 7),
+                    Text(
+                      widget.sceneTime.label,
+                      style: const TextStyle(color: Colors.white),
+                    ),
+                    const SizedBox(width: 2),
+                    Icon(
+                      _expanded
+                          ? Icons.keyboard_arrow_left_rounded
+                          : Icons.arrow_drop_down,
+                      color: Colors.white70,
+                      size: 18,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _TimeOptionPill extends StatelessWidget {
+  const _TimeOptionPill({
+    required this.liquidGlass,
+    required this.icon,
+    required this.label,
+    required this.selected,
+    required this.tooltip,
+    required this.onPressed,
+  });
+
+  final bool liquidGlass;
+  final IconData icon;
+  final String label;
+  final bool selected;
+  final String tooltip;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: tooltip,
+      child: GlassSurface(
+        liquidGlass: liquidGlass,
+        borderRadius: BorderRadius.circular(22),
+        fallbackColor: selected
+            ? Colors.white.withValues(alpha: 0.30)
+            : Colors.black.withValues(alpha: 0.38),
+        child: SizedBox(
+          width: 150,
+          height: 48,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(22),
+            onTap: onPressed,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(icon, color: Colors.white, size: 21),
+                const SizedBox(width: 8),
+                Text(label, style: const TextStyle(color: Colors.white)),
+                if (selected) ...[
+                  const SizedBox(width: 6),
+                  const Icon(
+                    Icons.check_rounded,
+                    color: Colors.white,
+                    size: 17,
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _VoiceModeOptionPill extends StatelessWidget {
+  const _VoiceModeOptionPill({
+    required this.liquidGlass,
+    required this.icon,
+    required this.label,
+    required this.selected,
+    required this.onPressed,
+  });
+
+  final bool liquidGlass;
+  final IconData icon;
+  final String label;
+  final bool selected;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    const foreground = Colors.white;
+    return GlassSurface(
+      liquidGlass: liquidGlass,
+      borderRadius: BorderRadius.circular(22),
+      fallbackColor: selected
+          ? Colors.white.withValues(alpha: 0.30)
+          : Colors.black.withValues(alpha: 0.38),
+      child: SizedBox(
+        width: 184,
+        height: 48,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(22),
+          onTap: onPressed,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14),
+            child: Row(
+              children: [
+                Icon(icon, color: foreground, size: 21),
+                const SizedBox(width: 9),
+                Expanded(
+                  child: Text(
+                    label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(color: foreground),
+                  ),
+                ),
+                if (selected)
+                  Icon(Icons.check_rounded, color: foreground, size: 17),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -2511,50 +3156,10 @@ class _RoundIcon extends StatelessWidget {
   Widget build(BuildContext context) {
     return GlassIconButton(
       liquidGlass: liquidGlass,
+      size: 48,
       icon: icon,
       tooltip: tooltip,
       onPressed: onPressed,
-    );
-  }
-}
-
-class _StatusPill extends StatelessWidget {
-  const _StatusPill({
-    required this.liquidGlass,
-    required this.icon,
-    required this.label,
-  });
-
-  final bool liquidGlass;
-  final IconData icon;
-  final String label;
-
-  @override
-  Widget build(BuildContext context) {
-    return GlassSurface(
-      liquidGlass: liquidGlass,
-      borderRadius: BorderRadius.circular(21),
-      fallbackColor: Colors.black.withValues(alpha: 0.38),
-      child: SizedBox(
-        height: 42,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(icon, color: Colors.white, size: 18),
-              const SizedBox(width: 7),
-              Text(label, style: const TextStyle(color: Colors.white)),
-              const SizedBox(width: 2),
-              const Icon(
-                Icons.arrow_drop_down,
-                color: Colors.white70,
-                size: 18,
-              ),
-            ],
-          ),
-        ),
-      ),
     );
   }
 }
@@ -2607,7 +3212,7 @@ class _CharacterToolCluster extends StatelessWidget {
                     ),
                   ],
                 )
-              : const SizedBox(width: 42),
+              : const SizedBox(width: 48),
         ),
       ],
     );
@@ -2631,6 +3236,7 @@ class _CharacterToolButton extends StatelessWidget {
   Widget build(BuildContext context) {
     return GlassIconButton(
       liquidGlass: liquidGlass,
+      size: 48,
       icon: icon,
       tooltip: tooltip,
       onPressed: onPressed,
@@ -2939,7 +3545,9 @@ class _AppearancePickerSheet extends StatelessWidget {
                         child: Image.asset(
                           appearance.previewAsset,
                           fit: BoxFit.cover,
-                          alignment: Alignment.topCenter,
+                          alignment: appearance.animated
+                              ? Alignment.topCenter
+                              : Alignment.bottomCenter,
                         ),
                       ),
                     ),
@@ -2964,31 +3572,6 @@ class _AppearancePickerSheet extends StatelessWidget {
                 ),
             ],
           ),
-        ),
-      ),
-    );
-  }
-}
-
-class _CharacterLabel extends StatelessWidget {
-  const _CharacterLabel({required this.liquidGlass});
-
-  final bool liquidGlass;
-
-  @override
-  Widget build(BuildContext context) {
-    return GlassSurface(
-      liquidGlass: liquidGlass,
-      borderRadius: BorderRadius.circular(16),
-      child: const Padding(
-        padding: EdgeInsets.symmetric(horizontal: 11, vertical: 7),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.touch_app_outlined, color: Colors.white70, size: 16),
-            SizedBox(width: 6),
-            Text('点击互动', style: TextStyle(color: Colors.white, fontSize: 12)),
-          ],
         ),
       ),
     );
@@ -3059,28 +3642,6 @@ class _StaticAppearanceLabel extends StatelessWidget {
   }
 }
 
-class _TapResultLabel extends StatelessWidget {
-  const _TapResultLabel({required this.part, required this.liquidGlass});
-
-  final String part;
-  final bool liquidGlass;
-
-  @override
-  Widget build(BuildContext context) {
-    return GlassSurface(
-      liquidGlass: liquidGlass,
-      borderRadius: BorderRadius.circular(16),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
-        child: Text(
-          '触发：$part',
-          style: const TextStyle(color: Colors.white, fontSize: 12),
-        ),
-      ),
-    );
-  }
-}
-
 class _RotatingIcon extends StatefulWidget {
   const _RotatingIcon(this.icon);
 
@@ -3110,6 +3671,109 @@ class _RotatingIconState extends State<_RotatingIcon>
   );
 }
 
+class _SuggestionQuotaButton extends StatelessWidget {
+  const _SuggestionQuotaButton({
+    required this.language,
+    required this.liquidGlass,
+    required this.isSuggesting,
+    required this.remaining,
+    required this.progress,
+    required this.wait,
+    required this.onPressed,
+  });
+
+  final AppLanguage language;
+  final bool liquidGlass;
+  final bool isSuggesting;
+  final int remaining;
+  final double progress;
+  final Duration wait;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final waitText = wait == Duration.zero
+        ? ''
+        : ' ${wait.inMinutes}:${wait.inSeconds.remainder(60).toString().padLeft(2, '0')}';
+    final tooltip = remaining > 0
+        ? language.text(
+            '生成建议回复（剩余 $remaining 次）',
+            'Suggest a reply ($remaining left)',
+            '返信案を作成（残り $remaining 回）',
+          )
+        : language.text(
+            '建议回复额度恢复倒计时$waitText',
+            'Reply suggestion refreshes in$waitText',
+            '返信案の回復まで$waitText',
+          );
+    return SizedBox(
+      width: 44,
+      height: 40,
+      child: Stack(
+        clipBehavior: Clip.none,
+        alignment: Alignment.centerLeft,
+        children: [
+          SizedBox.square(
+            dimension: 40,
+            child: CircularProgressIndicator(
+              value: progress,
+              strokeWidth: 2,
+              backgroundColor: Colors.white.withValues(alpha: 0.18),
+              valueColor: AlwaysStoppedAnimation<Color>(
+                remaining == 0
+                    ? Colors.amberAccent.withValues(alpha: 0.82)
+                    : Colors.white.withValues(alpha: 0.82),
+              ),
+            ),
+          ),
+          Positioned(
+            left: 2,
+            child: GlassIconButton(
+              liquidGlass: liquidGlass,
+              icon: isSuggesting
+                  ? Icons.autorenew_rounded
+                  : Icons.auto_awesome_rounded,
+              iconWidget: isSuggesting
+                  ? const _RotatingIcon(Icons.autorenew_rounded)
+                  : null,
+              tooltip: tooltip,
+              onPressed: onPressed,
+              size: 36,
+            ),
+          ),
+          Positioned(
+            right: -1,
+            top: -2,
+            child: IgnorePointer(
+              child: Container(
+                constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
+                alignment: Alignment.center,
+                padding: const EdgeInsets.symmetric(horizontal: 3),
+                decoration: BoxDecoration(
+                  color: remaining == 0
+                      ? const Color(0xFFD99636)
+                      : const Color(0xFF59636D),
+                  shape: BoxShape.circle,
+                  border: Border.all(color: Colors.white70, width: 0.8),
+                ),
+                child: Text(
+                  '$remaining',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w700,
+                    height: 1,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _LiquidGlassConversation extends StatelessWidget {
   const _LiquidGlassConversation({
     required this.language,
@@ -3120,7 +3784,9 @@ class _LiquidGlassConversation extends StatelessWidget {
     required this.inputController,
     required this.showMicrophone,
     required this.attachments,
-    required this.onAddAttachment,
+    required this.onTakePhoto,
+    required this.onPickImage,
+    required this.onPickFile,
     required this.onRemoveAttachment,
     required this.onSubmitted,
     required this.onSend,
@@ -3129,6 +3795,16 @@ class _LiquidGlassConversation extends StatelessWidget {
     required this.canReplay,
     required this.canContinue,
     required this.isContinuing,
+    required this.isSuggestingReply,
+    required this.suggestionUsesRemaining,
+    required this.suggestionRefreshProgress,
+    required this.suggestionRefreshWait,
+    required this.activeAssistantSegmentIndex,
+    required this.activeSegmentDisplayDuration,
+    required this.latestAssistantMessageKey,
+    required this.showScrollToBottomIndicator,
+    required this.onScrollToBottom,
+    required this.onSuggestReply,
     required this.onUndo,
     required this.onReplay,
     required this.onContinue,
@@ -3143,7 +3819,9 @@ class _LiquidGlassConversation extends StatelessWidget {
   final TextEditingController inputController;
   final bool showMicrophone;
   final List<ChatAttachment> attachments;
-  final VoidCallback onAddAttachment;
+  final VoidCallback onTakePhoto;
+  final VoidCallback onPickImage;
+  final VoidCallback onPickFile;
   final ValueChanged<ChatAttachment> onRemoveAttachment;
   final ValueChanged<String> onSubmitted;
   final VoidCallback onSend;
@@ -3152,6 +3830,16 @@ class _LiquidGlassConversation extends StatelessWidget {
   final bool canReplay;
   final bool canContinue;
   final bool isContinuing;
+  final bool isSuggestingReply;
+  final int suggestionUsesRemaining;
+  final double suggestionRefreshProgress;
+  final Duration suggestionRefreshWait;
+  final int? activeAssistantSegmentIndex;
+  final Duration activeSegmentDisplayDuration;
+  final GlobalKey latestAssistantMessageKey;
+  final bool showScrollToBottomIndicator;
+  final VoidCallback onScrollToBottom;
+  final VoidCallback onSuggestReply;
   final VoidCallback onUndo;
   final VoidCallback onReplay;
   final VoidCallback onContinue;
@@ -3169,10 +3857,29 @@ class _LiquidGlassConversation extends StatelessWidget {
             child: Column(
               children: [
                 Expanded(
-                  child: _GlassMessageList(
-                    language: language,
-                    messages: messages,
-                    controller: scrollController,
+                  child: Stack(
+                    children: [
+                      Positioned.fill(
+                        child: _GlassMessageList(
+                          language: language,
+                          messages: messages,
+                          controller: scrollController,
+                          activeAssistantSegmentIndex:
+                              activeAssistantSegmentIndex,
+                          activeSegmentDisplayDuration:
+                              activeSegmentDisplayDuration,
+                          latestAssistantMessageKey: latestAssistantMessageKey,
+                        ),
+                      ),
+                      if (showScrollToBottomIndicator)
+                        Positioned(
+                          right: 8,
+                          bottom: 5,
+                          child: _BouncingScrollIndicator(
+                            onPressed: onScrollToBottom,
+                          ),
+                        ),
+                    ],
                   ),
                 ),
                 Container(
@@ -3185,7 +3892,10 @@ class _LiquidGlassConversation extends StatelessWidget {
                   isReplying: isReplying,
                   showMicrophone: showMicrophone,
                   attachments: attachments,
-                  onAddAttachment: onAddAttachment,
+                  liquidGlass: liquidGlass,
+                  onTakePhoto: onTakePhoto,
+                  onPickImage: onPickImage,
+                  onPickFile: onPickFile,
                   onRemoveAttachment: onRemoveAttachment,
                   onSubmitted: onSubmitted,
                   onSend: onSend,
@@ -3200,6 +3910,21 @@ class _LiquidGlassConversation extends StatelessWidget {
           top: 0,
           child: Row(
             children: [
+              _SuggestionQuotaButton(
+                language: language,
+                liquidGlass: liquidGlass,
+                isSuggesting: isSuggestingReply,
+                remaining: suggestionUsesRemaining,
+                progress: suggestionRefreshProgress,
+                wait: suggestionRefreshWait,
+                onPressed:
+                    !isReplying &&
+                        !isSuggestingReply &&
+                        suggestionUsesRemaining > 0
+                    ? onSuggestReply
+                    : null,
+              ),
+              const SizedBox(width: 7),
               GlassIconButton(
                 liquidGlass: liquidGlass,
                 icon: Icons.undo_rounded,
@@ -3313,11 +4038,17 @@ class _GlassMessageList extends StatelessWidget {
     required this.language,
     required this.messages,
     required this.controller,
+    required this.activeAssistantSegmentIndex,
+    required this.activeSegmentDisplayDuration,
+    required this.latestAssistantMessageKey,
   });
 
   final AppLanguage language;
   final List<ChatMessage> messages;
   final ScrollController controller;
+  final int? activeAssistantSegmentIndex;
+  final Duration activeSegmentDisplayDuration;
+  final GlobalKey latestAssistantMessageKey;
 
   @override
   Widget build(BuildContext context) {
@@ -3336,12 +4067,17 @@ class _GlassMessageList extends StatelessWidget {
         final message = visibleMessages[messageIndex];
         if (!message.isUser) {
           return Padding(
+            key: index == 0 ? latestAssistantMessageKey : null,
             padding: const EdgeInsets.symmetric(vertical: 10),
             child: _SeparatedAssistantMessage(
               response: message.text,
               language: language,
               attachments: message.attachments,
               glass: true,
+              activeSegmentIndex: index == 0
+                  ? activeAssistantSegmentIndex
+                  : null,
+              activeSegmentDisplayDuration: activeSegmentDisplayDuration,
             ),
           );
         }
@@ -3410,7 +4146,10 @@ class _GlassMessageList extends StatelessWidget {
 String _glassMessageText(ChatMessage message) {
   if (message.isUser) return message.text;
   return displayTextForAssistantResponse(message.text)
-      .replaceAll(RegExp(r'^\s*(旁白|莱莎|译文)\s*[：:]\s*', multiLine: true), '')
+      .replaceAll(
+        RegExp(r'^\s*(旁白|莱莎|译文|角色\s*\[[^\]]+\])\s*[：:]\s*', multiLine: true),
+        '',
+      )
       .trim();
 }
 
@@ -3420,26 +4159,67 @@ class _SeparatedAssistantMessage extends StatelessWidget {
     required this.language,
     required this.attachments,
     required this.glass,
+    this.activeSegmentIndex,
+    this.activeSegmentDisplayDuration = Duration.zero,
   });
 
   final String response;
   final AppLanguage language;
   final List<ChatAttachment> attachments;
   final bool glass;
+  final int? activeSegmentIndex;
+  final Duration activeSegmentDisplayDuration;
 
   @override
   Widget build(BuildContext context) {
     final runs = groupAssistantSegmentsForDisplay(response);
+    var segmentOffset = 0;
+    final children = <Widget>[];
+    for (var index = 0; index < runs.length; index++) {
+      final run = runs[index];
+      final activeInRun =
+          activeSegmentIndex != null &&
+              activeSegmentIndex! >= segmentOffset &&
+              activeSegmentIndex! < segmentOffset + run.length
+          ? activeSegmentIndex! - segmentOffset
+          : null;
+      if (index > 0) children.add(const SizedBox(height: 10));
+      if (run.first.speaker == ChatSpeaker.narrator) {
+        children.add(
+          _NarratorRun(
+            segments: run,
+            glass: glass,
+            activeSegmentIndex: activeInRun,
+            activeSegmentDisplayDuration: activeSegmentDisplayDuration,
+          ),
+        );
+      } else if (run.first.speaker == ChatSpeaker.character) {
+        children.add(
+          _CharacterRun(
+            segments: run,
+            language: language,
+            glass: glass,
+            activeSegmentIndex: activeInRun,
+            activeSegmentDisplayDuration: activeSegmentDisplayDuration,
+          ),
+        );
+      } else {
+        children.add(
+          _RyzaRun(
+            segments: run,
+            language: language,
+            glass: glass,
+            activeSegmentIndex: activeInRun,
+            activeSegmentDisplayDuration: activeSegmentDisplayDuration,
+          ),
+        );
+      }
+      segmentOffset += run.length;
+    }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        for (var index = 0; index < runs.length; index++) ...[
-          if (index > 0) const SizedBox(height: 10),
-          if (runs[index].first.speaker == ChatSpeaker.narrator)
-            _NarratorRun(segments: runs[index], glass: glass)
-          else
-            _RyzaRun(segments: runs[index], language: language, glass: glass),
-        ],
+        ...children,
         if (attachments.isNotEmpty) ...[
           const SizedBox(height: 7),
           _SentAttachmentLabels(attachments: attachments, glass: glass),
@@ -3450,10 +4230,17 @@ class _SeparatedAssistantMessage extends StatelessWidget {
 }
 
 class _NarratorRun extends StatelessWidget {
-  const _NarratorRun({required this.segments, required this.glass});
+  const _NarratorRun({
+    required this.segments,
+    required this.glass,
+    this.activeSegmentIndex,
+    this.activeSegmentDisplayDuration = Duration.zero,
+  });
 
   final List<ChatSegment> segments;
   final bool glass;
+  final int? activeSegmentIndex;
+  final Duration activeSegmentDisplayDuration;
 
   @override
   Widget build(BuildContext context) {
@@ -3471,15 +4258,19 @@ class _NarratorRun extends StatelessWidget {
           ),
         ),
         Expanded(
-          child: Text(
-            segments.map(displayTextForAssistantSegment).join('\n'),
-            style: TextStyle(
-              color: glass
-                  ? Colors.white70
-                  : Theme.of(context).colorScheme.onSurfaceVariant,
-              fontSize: 13,
-              fontStyle: FontStyle.italic,
-              height: 1.38,
+          child: _AutoVisibleDialogueSegment(
+            active: activeSegmentIndex != null,
+            displayDuration: activeSegmentDisplayDuration,
+            child: Text(
+              segments.map(displayTextForAssistantSegment).join('\n'),
+              style: TextStyle(
+                color: glass
+                    ? Colors.white70
+                    : Theme.of(context).colorScheme.onSurfaceVariant,
+                fontSize: 13,
+                fontStyle: FontStyle.italic,
+                height: 1.38,
+              ),
             ),
           ),
         ),
@@ -3493,11 +4284,15 @@ class _RyzaRun extends StatelessWidget {
     required this.segments,
     required this.language,
     required this.glass,
+    this.activeSegmentIndex,
+    this.activeSegmentDisplayDuration = Duration.zero,
   });
 
   final List<ChatSegment> segments;
   final AppLanguage language;
   final bool glass;
+  final int? activeSegmentIndex;
+  final Duration activeSegmentDisplayDuration;
 
   @override
   Widget build(BuildContext context) {
@@ -3515,10 +4310,15 @@ class _RyzaRun extends StatelessWidget {
               : Theme.of(context).colorScheme.outlineVariant,
         ),
       ),
-      child: Icon(
-        Icons.auto_awesome_rounded,
-        size: 16,
-        color: glass ? Colors.white : Theme.of(context).colorScheme.primary,
+      clipBehavior: Clip.antiAlias,
+      child: Image.asset(
+        'assets/images/chara_icons/ryza.png',
+        fit: BoxFit.cover,
+        errorBuilder: (_, _, _) => Icon(
+          Icons.person_outline_rounded,
+          size: 16,
+          color: glass ? Colors.white : Theme.of(context).colorScheme.primary,
+        ),
       ),
     );
     return Row(
@@ -3541,7 +4341,103 @@ class _RyzaRun extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 2),
-              _DialogueSegmentBody(segments: segments, glass: glass),
+              _DialogueSegmentBody(
+                segments: segments,
+                glass: glass,
+                activeSegmentIndex: activeSegmentIndex,
+                activeSegmentDisplayDuration: activeSegmentDisplayDuration,
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _CharacterRun extends StatelessWidget {
+  const _CharacterRun({
+    required this.segments,
+    required this.language,
+    required this.glass,
+    this.activeSegmentIndex,
+    this.activeSegmentDisplayDuration = Duration.zero,
+  });
+
+  final List<ChatSegment> segments;
+  final AppLanguage language;
+  final bool glass;
+  final int? activeSegmentIndex;
+  final Duration activeSegmentDisplayDuration;
+
+  @override
+  Widget build(BuildContext context) {
+    final id = segments.first.characterId ?? 'unknown';
+    final catalog = CharacterCatalog.current;
+    final profile = catalog?.profile(id);
+    final name = catalog?.displayName(id, language) ?? id;
+    final fallbackColor = glass
+        ? Colors.white.withValues(alpha: 0.16)
+        : Theme.of(context).colorScheme.surfaceContainerHighest;
+    final avatar = Container(
+      width: 28,
+      height: 28,
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: fallbackColor,
+        border: Border.all(
+          color: glass
+              ? Colors.white.withValues(alpha: 0.24)
+              : Theme.of(context).colorScheme.outlineVariant,
+        ),
+      ),
+      child: profile == null
+          ? Icon(
+              Icons.person_outline_rounded,
+              size: 16,
+              color: glass
+                  ? Colors.white
+                  : Theme.of(context).colorScheme.primary,
+            )
+          : Image.asset(
+              profile.avatarAsset,
+              fit: BoxFit.cover,
+              errorBuilder: (_, _, _) => Icon(
+                Icons.person_outline_rounded,
+                size: 16,
+                color: glass
+                    ? Colors.white
+                    : Theme.of(context).colorScheme.primary,
+              ),
+            ),
+    );
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        avatar,
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                name,
+                style: TextStyle(
+                  color: glass
+                      ? Colors.white70
+                      : Theme.of(context).colorScheme.onSurfaceVariant,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 2),
+              _DialogueSegmentBody(
+                segments: segments,
+                glass: glass,
+                activeSegmentIndex: activeSegmentIndex,
+                activeSegmentDisplayDuration: activeSegmentDisplayDuration,
+              ),
             ],
           ),
         ),
@@ -3551,10 +4447,17 @@ class _RyzaRun extends StatelessWidget {
 }
 
 class _DialogueSegmentBody extends StatelessWidget {
-  const _DialogueSegmentBody({required this.segments, required this.glass});
+  const _DialogueSegmentBody({
+    required this.segments,
+    required this.glass,
+    this.activeSegmentIndex,
+    this.activeSegmentDisplayDuration = Duration.zero,
+  });
 
   final List<ChatSegment> segments;
   final bool glass;
+  final int? activeSegmentIndex;
+  final Duration activeSegmentDisplayDuration;
 
   @override
   Widget build(BuildContext context) {
@@ -3570,19 +4473,103 @@ class _DialogueSegmentBody extends StatelessWidget {
                   ? Colors.white.withValues(alpha: 0.22)
                   : Colors.black.withValues(alpha: 0.13),
             ),
-          Text(
-            '${segments[index].speaker == ChatSpeaker.translation ? '译文：' : ''}'
-            '${displayTextForAssistantSegment(segments[index])}',
-            style: TextStyle(
-              color: glass
-                  ? Colors.white
-                  : Theme.of(context).colorScheme.onSurface,
-              fontSize: 14,
-              height: 1.4,
+          _AutoVisibleDialogueSegment(
+            active: activeSegmentIndex == index,
+            displayDuration: activeSegmentDisplayDuration,
+            child: Text(
+              '${segments[index].speaker == ChatSpeaker.translation ? '译文：' : ''}'
+              '${displayTextForAssistantSegment(segments[index])}',
+              style: TextStyle(
+                color: glass
+                    ? Colors.white
+                    : Theme.of(context).colorScheme.onSurface,
+                fontSize: 14,
+                height: 1.4,
+              ),
             ),
           ),
         ],
       ],
+    );
+  }
+}
+
+class _AutoVisibleDialogueSegment extends StatefulWidget {
+  const _AutoVisibleDialogueSegment({
+    required this.active,
+    required this.displayDuration,
+    required this.child,
+  });
+
+  final bool active;
+  final Duration displayDuration;
+  final Widget child;
+
+  @override
+  State<_AutoVisibleDialogueSegment> createState() =>
+      _AutoVisibleDialogueSegmentState();
+}
+
+class _AutoVisibleDialogueSegmentState
+    extends State<_AutoVisibleDialogueSegment> {
+  @override
+  Widget build(BuildContext context) => widget.child;
+}
+
+class _BouncingScrollIndicator extends StatefulWidget {
+  const _BouncingScrollIndicator({required this.onPressed});
+
+  final VoidCallback onPressed;
+
+  @override
+  State<_BouncingScrollIndicator> createState() =>
+      _BouncingScrollIndicatorState();
+}
+
+class _BouncingScrollIndicatorState extends State<_BouncingScrollIndicator>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 620),
+    )..repeat(reverse: true);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      button: true,
+      label: '回到最新消息底部',
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: widget.onPressed,
+        child: SizedBox.square(
+          dimension: 34,
+          child: AnimatedBuilder(
+            animation: _controller,
+            builder: (context, child) => Transform.translate(
+              offset: Offset(0, 4 * _controller.value),
+              child: child,
+            ),
+            child: const Icon(
+              Icons.arrow_drop_down_rounded,
+              color: Colors.white,
+              size: 32,
+              shadows: [Shadow(color: Colors.black54, blurRadius: 5)],
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
@@ -3815,7 +4802,10 @@ class _GlassComposer extends StatelessWidget {
     required this.isReplying,
     required this.showMicrophone,
     required this.attachments,
-    required this.onAddAttachment,
+    required this.liquidGlass,
+    required this.onTakePhoto,
+    required this.onPickImage,
+    required this.onPickFile,
     required this.onRemoveAttachment,
     required this.onSubmitted,
     required this.onSend,
@@ -3827,7 +4817,10 @@ class _GlassComposer extends StatelessWidget {
   final bool isReplying;
   final bool showMicrophone;
   final List<ChatAttachment> attachments;
-  final VoidCallback onAddAttachment;
+  final bool liquidGlass;
+  final VoidCallback onTakePhoto;
+  final VoidCallback onPickImage;
+  final VoidCallback onPickFile;
   final ValueChanged<ChatAttachment> onRemoveAttachment;
   final ValueChanged<String> onSubmitted;
   final VoidCallback onSend;
@@ -3902,15 +4895,13 @@ class _GlassComposer extends StatelessWidget {
                             ),
                       hintStyle: const TextStyle(color: Colors.white60),
                       border: InputBorder.none,
-                      suffixIcon: IconButton(
-                        onPressed: !isReplying ? onAddAttachment : null,
-                        tooltip: language.text(
-                          '添加图片或文件',
-                          'Add image or file',
-                          '画像またはファイルを追加',
-                        ),
-                        color: Colors.white,
-                        icon: const Icon(Icons.add_rounded, size: 30),
+                      suffixIcon: _AttachmentMenuButton(
+                        language: language,
+                        liquidGlass: liquidGlass,
+                        enabled: !isReplying,
+                        onTakePhoto: onTakePhoto,
+                        onPickImage: onPickImage,
+                        onPickFile: onPickFile,
                       ),
                     ),
                   ),
@@ -3946,6 +4937,181 @@ class _GlassComposer extends StatelessWidget {
             ],
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _AttachmentMenuButton extends StatefulWidget {
+  const _AttachmentMenuButton({
+    required this.language,
+    required this.liquidGlass,
+    required this.enabled,
+    required this.onTakePhoto,
+    required this.onPickImage,
+    required this.onPickFile,
+  });
+
+  final AppLanguage language;
+  final bool liquidGlass;
+  final bool enabled;
+  final VoidCallback onTakePhoto;
+  final VoidCallback onPickImage;
+  final VoidCallback onPickFile;
+
+  @override
+  State<_AttachmentMenuButton> createState() => _AttachmentMenuButtonState();
+}
+
+class _AttachmentMenuButtonState extends State<_AttachmentMenuButton> {
+  final _layerLink = LayerLink();
+  OverlayEntry? _overlayEntry;
+
+  bool get _expanded => _overlayEntry != null;
+
+  void _toggle() {
+    if (_expanded) {
+      _close();
+      return;
+    }
+    if (!widget.enabled) return;
+    _overlayEntry = OverlayEntry(
+      builder: (overlayContext) => Stack(
+        children: [
+          Positioned.fill(
+            child: GestureDetector(
+              behavior: HitTestBehavior.translucent,
+              onTap: _close,
+            ),
+          ),
+          CompositedTransformFollower(
+            link: _layerLink,
+            showWhenUnlinked: false,
+            targetAnchor: Alignment.topRight,
+            followerAnchor: Alignment.bottomRight,
+            offset: const Offset(0, -8),
+            child: Material(
+              type: MaterialType.transparency,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  _AttachmentMenuOption(
+                    liquidGlass: widget.liquidGlass,
+                    icon: Icons.camera_alt_outlined,
+                    label: widget.language.text('拍照', 'Camera', '撮影'),
+                    onPressed: () => _select(widget.onTakePhoto),
+                  ),
+                  const SizedBox(height: 6),
+                  _AttachmentMenuOption(
+                    liquidGlass: widget.liquidGlass,
+                    icon: Icons.image_outlined,
+                    label: widget.language.text('图片', 'Image', '画像'),
+                    onPressed: () => _select(widget.onPickImage),
+                  ),
+                  const SizedBox(height: 6),
+                  _AttachmentMenuOption(
+                    liquidGlass: widget.liquidGlass,
+                    icon: Icons.description_outlined,
+                    label: widget.language.text('文件', 'File', 'ファイル'),
+                    onPressed: () => _select(widget.onPickFile),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+    Overlay.of(context).insert(_overlayEntry!);
+    setState(() {});
+  }
+
+  void _select(VoidCallback callback) {
+    _close();
+    callback();
+  }
+
+  void _close() {
+    _overlayEntry?.remove();
+    _overlayEntry = null;
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void didUpdateWidget(covariant _AttachmentMenuButton oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!widget.enabled && _expanded) _close();
+  }
+
+  @override
+  void dispose() {
+    _overlayEntry?.remove();
+    _overlayEntry = null;
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return CompositedTransformTarget(
+      link: _layerLink,
+      child: IconButton(
+        onPressed: widget.enabled ? _toggle : null,
+        tooltip: _expanded
+            ? widget.language.text(
+                '收起附件菜单',
+                'Close attachment menu',
+                '添付メニューを閉じる',
+              )
+            : widget.language.text('添加附件', 'Add attachment', '添付を追加'),
+        color: Colors.white,
+        icon: AnimatedSwitcher(
+          duration: const Duration(milliseconds: 180),
+          child: Icon(
+            _expanded ? Icons.close_rounded : Icons.add_rounded,
+            key: ValueKey(_expanded),
+            size: 30,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _AttachmentMenuOption extends StatelessWidget {
+  const _AttachmentMenuOption({
+    required this.liquidGlass,
+    required this.icon,
+    required this.label,
+    required this.onPressed,
+  });
+
+  final bool liquidGlass;
+  final IconData icon;
+  final String label;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return GlassSurface(
+      liquidGlass: liquidGlass,
+      borderRadius: BorderRadius.circular(20),
+      fallbackColor: Colors.black.withValues(alpha: 0.58),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(20),
+        onTap: onPressed,
+        child: SizedBox(
+          width: 116,
+          height: 40,
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(icon, color: Colors.white, size: 19),
+              const SizedBox(width: 8),
+              Text(label, style: const TextStyle(color: Colors.white)),
+            ],
+          ),
+        ),
       ),
     );
   }

@@ -67,6 +67,15 @@ assets/**/*
 !assets/**/
 !assets/**/.gitkeep
 
+# User-provided branding explicitly approved for public distribution.
+!assets/branding/
+!assets/branding/agent_atelier_logo.png
+!assets/branding/app_icon_source.png
+!android/app/src/main/res/drawable-*/launch_logo.png
+!android/app/src/main/res/drawable-*/ic_launcher_foreground.png
+!android/app/src/main/res/drawable-nodpi/launch_logo_android12.png
+!android/app/src/main/res/mipmap-*/ic_launcher.png
+
 # Do not vendor third-party runtime source or extracted application files.
 packages/
 downloaded_skin_resources/

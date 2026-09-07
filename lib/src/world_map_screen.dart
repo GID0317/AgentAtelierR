@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 
 import 'app_controller.dart';
 import 'app_localization.dart';
+import 'character_catalog.dart';
 import 'glass_ui.dart';
 import 'world_map_localization.dart';
 
@@ -528,18 +529,8 @@ class _WorldMapScreenState extends State<WorldMapScreen>
       areaName: areaName,
       stageName: stageName,
     );
-    setState(() => _previewStageId = stage.id);
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          language.text(
-            '已前往：$stageName',
-            'Travelled to: $stageName',
-            '移動先：$stageName',
-          ),
-        ),
-      ),
-    );
+    if (mounted) setState(() => _previewStageId = stage.id);
+    widget.onClose();
   }
 
   Future<void> _showAreaPicker(WorldMapData data) async {
@@ -712,6 +703,7 @@ class _WorldMapScreenState extends State<WorldMapScreen>
                 currentStageId: widget.controller.selectedStageId,
                 npcs: data.npcs,
                 language: widget.controller.interfaceLanguage,
+                onDismiss: () => _leaveField(area, focusedField),
                 onStageSelected: (stage) {
                   setState(() => _previewStageId = stage.id);
                 },
@@ -740,10 +732,6 @@ class _WorldMapScreenState extends State<WorldMapScreen>
                       '目的地を選択',
                     ),
               liquidGlass: widget.controller.liquidGlassChatUi,
-              onClose: focusedField == null
-                  ? widget.onClose
-                  : () => _leaveField(area, focusedField),
-              onMenu: widget.onMenuPressed,
             ),
             _MapBottomBar(
               areaName: localizedWorldPlaceName(
@@ -950,6 +938,7 @@ class _FieldFocusOverlay extends StatelessWidget {
     required this.currentStageId,
     required this.npcs,
     required this.language,
+    required this.onDismiss,
     required this.onStageSelected,
   });
 
@@ -959,6 +948,7 @@ class _FieldFocusOverlay extends StatelessWidget {
   final String currentStageId;
   final List<MapNpc> npcs;
   final AppLanguage language;
+  final VoidCallback onDismiss;
   final ValueChanged<WorldStage> onStageSelected;
 
   @override
@@ -995,118 +985,132 @@ class _FieldFocusOverlay extends StatelessWidget {
         )
         .take(4)
         .toList();
+    final localizedNpcNames = previewNpcs
+        .map(
+          (npc) =>
+              CharacterCatalog.current?.displayNameForPlacementId(
+                npc.id,
+                language,
+              ) ??
+              npc.name,
+        )
+        .join(' / ');
 
-    return Center(
-      child: Transform.translate(
-        offset: Offset(0, portrait ? -22 : 4),
-        child: TweenAnimationBuilder<double>(
-          tween: Tween(begin: 0.90, end: 1),
-          duration: const Duration(milliseconds: 420),
-          curve: Curves.easeOutBack,
-          builder: (context, value, child) => Opacity(
-            opacity: value.clamp(0, 1),
-            child: Transform.scale(scale: value, child: child),
-          ),
-          child: SizedBox(
-            width: width,
-            height: height,
-            child: Stack(
-              clipBehavior: Clip.none,
-              children: [
-                Positioned.fill(
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(height * 0.34),
-                      boxShadow: const [
-                        BoxShadow(
-                          color: Color(0x99FFB52B),
-                          blurRadius: 28,
-                          spreadRadius: 2,
-                        ),
-                        BoxShadow(
-                          color: Colors.black54,
-                          blurRadius: 34,
-                          offset: Offset(0, 14),
-                        ),
-                      ],
-                    ),
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(height * 0.34),
-                      child: Stack(
-                        fit: StackFit.expand,
-                        children: [
-                          _FocusedMapImage(
-                            asset: 'assets/world_map/areas/${area.id}.jpg',
-                            center: focus.pin,
-                            zoom: focus.focusScale,
-                          ),
-                          DecoratedBox(
-                            decoration: BoxDecoration(
-                              gradient: RadialGradient(
-                                radius: 0.82,
-                                colors: [
-                                  Colors.transparent,
-                                  const Color(0xFFFF9D24)
-                                      .withValues(alpha: 0.20),
-                                ],
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-                Positioned.fill(
-                  child: IgnorePointer(
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onDismiss,
+      child: Center(
+        child: Transform.translate(
+          offset: Offset(0, portrait ? -22 : 4),
+          child: TweenAnimationBuilder<double>(
+            tween: Tween(begin: 0.90, end: 1),
+            duration: const Duration(milliseconds: 420),
+            curve: Curves.easeOutBack,
+            builder: (context, value, child) => Opacity(
+              opacity: value.clamp(0, 1),
+              child: Transform.scale(scale: value, child: child),
+            ),
+            child: SizedBox(
+              width: width,
+              height: height,
+              child: Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  Positioned.fill(
                     child: DecoratedBox(
                       decoration: BoxDecoration(
                         borderRadius: BorderRadius.circular(height * 0.34),
-                        border: Border.all(
-                          color: const Color(0xFFFFD36A),
-                          width: 2.5,
+                        boxShadow: const [
+                          BoxShadow(
+                            color: Color(0x99FFB52B),
+                            blurRadius: 28,
+                            spreadRadius: 2,
+                          ),
+                          BoxShadow(
+                            color: Colors.black54,
+                            blurRadius: 34,
+                            offset: Offset(0, 14),
+                          ),
+                        ],
+                      ),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(height * 0.34),
+                        child: Stack(
+                          fit: StackFit.expand,
+                          children: [
+                            _FocusedMapImage(
+                              asset: 'assets/world_map/areas/${area.id}.jpg',
+                              center: focus.pin,
+                              zoom: focus.focusScale,
+                            ),
+                            DecoratedBox(
+                              decoration: BoxDecoration(
+                                gradient: RadialGradient(
+                                  radius: 0.82,
+                                  colors: [
+                                    Colors.transparent,
+                                    const Color(0xFFFF9D24)
+                                        .withValues(alpha: 0.20),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ],
                         ),
                       ),
                     ),
                   ),
-                ),
-                for (var index = 0; index < field.stages.length; index++)
-                  _StagePin(
-                    stage: field.stages[index],
-                    language: language,
-                    position: positions[index],
-                    selected: field.stages[index].id == previewStageId,
-                    current: field.stages[index].id == currentStageId,
-                    onTap: () => onStageSelected(field.stages[index]),
-                  ),
-                if (previewNpcs.isNotEmpty)
-                  Positioned(
-                    left: 14,
-                    top: 14,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 10,
-                        vertical: 6,
-                      ),
-                      decoration: BoxDecoration(
-                        color: Colors.black.withValues(alpha: 0.58),
-                        borderRadius: BorderRadius.circular(16),
-                        border: Border.all(color: Colors.white24),
-                      ),
-                      child: Text(
-                        language.text(
-                          '可能遇见：${previewNpcs.map((npc) => npc.name).join(' / ')}',
-                          'May meet: ${previewNpcs.map((npc) => npc.name).join(' / ')}',
-                          '会えるかも：${previewNpcs.map((npc) => npc.name).join(' / ')}',
-                        ),
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 11,
+                  Positioned.fill(
+                    child: IgnorePointer(
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(height * 0.34),
+                          border: Border.all(
+                            color: const Color(0xFFFFD36A),
+                            width: 2.5,
+                          ),
                         ),
                       ),
                     ),
                   ),
-              ],
+                  for (var index = 0; index < field.stages.length; index++)
+                    _StagePin(
+                      stage: field.stages[index],
+                      language: language,
+                      position: positions[index],
+                      selected: field.stages[index].id == previewStageId,
+                      current: field.stages[index].id == currentStageId,
+                      onTap: () => onStageSelected(field.stages[index]),
+                    ),
+                  if (previewNpcs.isNotEmpty)
+                    Positioned(
+                      left: 14,
+                      top: 14,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 6,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.black.withValues(alpha: 0.58),
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(color: Colors.white24),
+                        ),
+                        child: Text(
+                          language.text(
+                            '可能遇见：$localizedNpcNames',
+                            'May meet: $localizedNpcNames',
+                            '会えるかも：$localizedNpcNames',
+                          ),
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 11,
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
             ),
           ),
         ),
@@ -1273,33 +1277,22 @@ class _MapTopBar extends StatelessWidget {
     required this.title,
     required this.subtitle,
     required this.liquidGlass,
-    required this.onClose,
-    required this.onMenu,
   });
 
   final String title;
   final String subtitle;
   final bool liquidGlass;
-  final VoidCallback onClose;
-  final VoidCallback onMenu;
 
   @override
   Widget build(BuildContext context) {
     return SafeArea(
       bottom: false,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(14, 10, 14, 0),
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            GlassIconButton(
-              liquidGlass: liquidGlass,
-              icon: Icons.close_rounded,
-              tooltip: '关闭',
-              onPressed: onClose,
-              size: 52,
-            ),
-            const SizedBox(width: 10),
+            const SizedBox(width: 58),
             Expanded(
               child: GlassSurface(
                 liquidGlass: liquidGlass,
@@ -1337,14 +1330,6 @@ class _MapTopBar extends StatelessWidget {
                   ),
                 ),
               ),
-            ),
-            const SizedBox(width: 10),
-            GlassIconButton(
-              liquidGlass: liquidGlass,
-              icon: Icons.menu_rounded,
-              tooltip: '菜单',
-              onPressed: onMenu,
-              size: 52,
             ),
           ],
         ),

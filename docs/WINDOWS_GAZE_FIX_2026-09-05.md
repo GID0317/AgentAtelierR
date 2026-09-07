@@ -44,12 +44,6 @@
 
 From the Flutter project directory, with Visual Studio C++ tools and NuGet on PATH:
 
-For a fresh source-only checkout, follow
-[resource and platform setup](RESOURCE_SETUP_AND_BUILD.md) first. The generated
-Windows runner is intentionally not tracked; create it locally with
-`flutter create --platforms=windows .` and apply the documented MSVC compatibility
-definition if required.
-
 ```powershell
 flutter analyze
 flutter test

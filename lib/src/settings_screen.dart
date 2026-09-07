@@ -11,6 +11,7 @@ import 'app_localization.dart';
 import 'chat_segments.dart';
 import 'runtime_log.dart';
 import 'platform_slider.dart';
+import 'glass_ui.dart';
 
 String _activeTtsModel(AppController controller) =>
     switch (controller.ttsProvider) {
@@ -33,411 +34,495 @@ class SettingsScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final language = controller.interfaceLanguage;
     return Scaffold(
+      backgroundColor: Colors.transparent,
       appBar: AppBar(
-        leading: IconButton(
-          onPressed: onMenuPressed,
-          tooltip: language.text('菜单', 'Menu', 'メニュー'),
-          icon: const Icon(Icons.menu),
+        automaticallyImplyLeading: false,
+        title: Padding(
+          padding: const EdgeInsets.only(left: 58),
+          child: Text(language.text('设置', 'Settings', '設定')),
         ),
-        title: Text(language.text('设置', 'Settings', '設定')),
       ),
-      body: ListView(
-        padding: const EdgeInsets.only(bottom: 32),
-        children: [
-          _SectionLabel(language.text('界面', 'Appearance', '表示')),
-          ListTile(
-            leading: const Icon(Icons.contrast_rounded),
-            title: Text(language.text('主题', 'Theme', 'テーマ')),
-            subtitle: Text(controller.themePreference.label(language)),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => _showThemeSettings(context),
-          ),
-          ListTile(
-            leading: const Icon(Icons.translate_rounded),
-            title: Text(language.text('语言', 'Languages', '言語')),
-            subtitle: Text(
-              '${controller.interfaceLanguage.nativeLabel} · '
-              '${language.text('莱莎', 'Ryza', 'ライザ')} '
-              '${controller.characterReplyLanguage.nativeLabel}',
+      body: GlassSurface(
+        liquidGlass: controller.liquidGlassChatUi,
+        tone: Theme.of(context).brightness == Brightness.dark
+            ? GlassTone.dark
+            : GlassTone.light,
+        borderRadius: BorderRadius.zero,
+        fallbackColor: Theme.of(context).brightness == Brightness.dark
+            ? const Color(0xD91C2222)
+            : const Color(0xB8EEF2F0),
+        child: ListView(
+          padding: const EdgeInsets.only(bottom: 32),
+          children: [
+            _SectionLabel(language.text('界面', 'Appearance', '表示')),
+            ListTile(
+              leading: const Icon(Icons.contrast_rounded),
+              title: Text(language.text('主题', 'Theme', 'テーマ')),
+              subtitle: Text(controller.themePreference.label(language)),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => _showThemeSettings(context),
             ),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => _showLanguageSettings(context),
-          ),
-          SwitchListTile(
-            value: controller.liquidGlassChatUi,
-            onChanged: controller.setLiquidGlassChatUi,
-            secondary: const Icon(Icons.blur_on_rounded),
-            title: Text(
-              language.text('液态玻璃对话框', 'Liquid glass chat', 'リキッドガラス会話'),
+            ListTile(
+              leading: const Icon(Icons.translate_rounded),
+              title: Text(language.text('语言', 'Languages', '言語')),
+              subtitle: Text(
+                '${controller.interfaceLanguage.nativeLabel} · '
+                '${language.text('莱莎', 'Ryza', 'ライザ')} '
+                '${controller.characterReplyLanguage.nativeLabel}',
+              ),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => _showLanguageSettings(context),
             ),
-            subtitle: Text(
-              controller.liquidGlassChatUi
-                  ? language.text(
-                      '动态浮层启用背景模糊与玻璃高光',
-                      'Blur and glass highlights enabled',
-                      'ぼかしとガラスのハイライトを有効化',
-                    )
-                  : language.text(
-                      '保留动态浮层，仅关闭模糊并使用普通半透明材质',
-                      'Use the translucent panel without blur',
-                      'ぼかしなしの半透明パネルを使用',
-                    ),
-            ),
-          ),
-          SwitchListTile(
-            value: controller.showMicrophoneButton,
-            onChanged: controller.setShowMicrophoneButton,
-            secondary: const Icon(Icons.mic_none_rounded),
-            title: Text(
-              language.text('显示麦克风按钮', 'Show microphone button', 'マイクボタンを表示'),
-            ),
-            subtitle: Text(
-              language.text(
-                '语音输入尚未接入，默认隐藏',
-                'Voice input is not available yet',
-                '音声入力はまだ利用できません',
+            SwitchListTile(
+              value: controller.liquidGlassChatUi,
+              onChanged: controller.setLiquidGlassChatUi,
+              secondary: const Icon(Icons.blur_on_rounded),
+              title: Text(
+                language.text('液态玻璃对话框', 'Liquid glass chat', 'リキッドガラス会話'),
+              ),
+              subtitle: Text(
+                controller.liquidGlassChatUi
+                    ? language.text(
+                        '动态浮层启用背景模糊与玻璃高光',
+                        'Blur and glass highlights enabled',
+                        'ぼかしとガラスのハイライトを有効化',
+                      )
+                    : language.text(
+                        '保留动态浮层，仅关闭模糊并使用普通半透明材质',
+                        'Use the translucent panel without blur',
+                        'ぼかしなしの半透明パネルを使用',
+                      ),
               ),
             ),
-          ),
-          SwitchListTile(
-            value: controller.gazeTrackingEnabled,
-            onChanged: controller.setGazeTrackingEnabled,
-            secondary: const Icon(Icons.visibility_rounded),
-            title: Text(language.text('视线追踪', 'Gaze tracking', '視線追跡')),
-            subtitle: Text(
-              language.text(
-                '按住角色区域时，眼睛与高光跟随手指方向',
-                'Eyes and highlights follow your finger while held',
-                '押している間、目とハイライトが指を追跡',
+            SwitchListTile(
+              value: controller.showMicrophoneButton,
+              onChanged: controller.setShowMicrophoneButton,
+              secondary: const Icon(Icons.mic_none_rounded),
+              title: Text(
+                language.text('显示麦克风按钮', 'Show microphone button', 'マイクボタンを表示'),
+              ),
+              subtitle: Text(
+                language.text(
+                  '语音输入尚未接入，默认隐藏',
+                  'Voice input is not available yet',
+                  '音声入力はまだ利用できません',
+                ),
               ),
             ),
-          ),
-          const Divider(indent: 16, endIndent: 16),
-          _SectionLabel(language.text('场景', 'Scene', 'シーン')),
-          SwitchListTile(
-            value: controller.automaticSceneTime,
-            onChanged: controller.setAutomaticSceneTime,
-            secondary: const Icon(Icons.schedule_outlined),
-            title: Text(
-              language.text('根据时间自动切换', 'Follow time of day', '時刻に合わせて切り替え'),
-            ),
-            subtitle: Text(
-              controller.automaticSceneTime
-                  ? language.text(
-                      '当前自动使用${controller.sceneTime.label}场景',
-                      'Scene changes automatically',
-                      'シーンを自動的に変更します',
-                    )
-                  : language.text(
-                      '当前固定为${controller.sceneTime.label}场景',
-                      'Scene time is fixed',
-                      'シーンの時間は固定です',
-                    ),
-            ),
-          ),
-          const Divider(indent: 16, endIndent: 16),
-          _SectionLabel(language.text('声音', 'Audio', 'サウンド')),
-          SwitchListTile(
-            value: controller.voiceEnabled,
-            onChanged: controller.setVoiceEnabled,
-            secondary: const Icon(Icons.record_voice_over_outlined),
-            title: Text(language.text('点击语音', 'Tap voice', 'タップ音声')),
-            subtitle: Text(
-              language.text(
-                '点击角色时播放对应语音',
-                'Play a voice line when Ryza is tapped',
-                'ライザをタップすると音声を再生します',
+            SwitchListTile(
+              value: controller.gazeTrackingEnabled,
+              onChanged: controller.setGazeTrackingEnabled,
+              secondary: const Icon(Icons.visibility_rounded),
+              title: Text(language.text('视线追踪', 'Gaze tracking', '視線追跡')),
+              subtitle: Text(
+                language.text(
+                  '按住角色区域时，眼睛与高光跟随手指方向',
+                  'Eyes and highlights follow your finger while held',
+                  '押している間、目とハイライトが指を追跡',
+                ),
               ),
             ),
-          ),
-          ListTile(
-            leading: const Icon(Icons.volume_up_outlined),
-            title: Text(language.text('语音音量', 'Voice volume', '音声音量')),
-            subtitle: PlatformSlider(
-              value: controller.voiceVolume,
-              onChanged: controller.voiceEnabled
-                  ? controller.setVoiceVolume
-                  : null,
-            ),
-            trailing: SizedBox(
-              width: 42,
-              child: Text(
-                '${(controller.voiceVolume * 100).round()}%',
-                textAlign: TextAlign.end,
+            const Divider(indent: 16, endIndent: 16),
+            _SectionLabel(language.text('场景', 'Scene', 'シーン')),
+            SwitchListTile(
+              value: controller.automaticSceneTime,
+              onChanged: controller.setAutomaticSceneTime,
+              secondary: const Icon(Icons.schedule_outlined),
+              title: Text(
+                language.text('根据时间自动切换', 'Follow time of day', '時刻に合わせて切り替え'),
+              ),
+              subtitle: Text(
+                controller.automaticSceneTime
+                    ? language.text(
+                        '当前自动使用${controller.sceneTime.label}场景',
+                        'Scene changes automatically',
+                        'シーンを自動的に変更します',
+                      )
+                    : language.text(
+                        '当前固定为${controller.sceneTime.label}场景',
+                        'Scene time is fixed',
+                        'シーンの時間は固定です',
+                      ),
               ),
             ),
-          ),
-          SwitchListTile(
-            value: controller.bgmEnabled,
-            onChanged: controller.setBgmEnabled,
-            secondary: const Icon(Icons.music_note_outlined),
-            title: Text(language.text('背景音乐', 'Background music', 'BGM')),
-            subtitle: Text(
-              language.text(
-                '循环播放工房主题音乐',
-                'Loop the atelier theme',
-                'アトリエのテーマをループ再生',
+            const Divider(indent: 16, endIndent: 16),
+            _SectionLabel(language.text('声音', 'Audio', 'サウンド')),
+            SwitchListTile(
+              value: controller.voiceEnabled,
+              onChanged: controller.setVoiceEnabled,
+              secondary: const Icon(Icons.record_voice_over_outlined),
+              title: Text(language.text('点击语音', 'Tap voice', 'タップ音声')),
+              subtitle: Text(
+                language.text(
+                  '点击角色时播放对应语音',
+                  'Play a voice line when Ryza is tapped',
+                  'ライザをタップすると音声を再生します',
+                ),
               ),
             ),
-          ),
-          ListTile(
-            leading: const Icon(Icons.music_note),
-            title: Text(language.text('音乐音量', 'Music volume', 'BGM音量')),
-            subtitle: PlatformSlider(
-              value: controller.bgmVolume,
-              onChanged: controller.bgmEnabled ? controller.setBgmVolume : null,
-            ),
-            trailing: Text('${(controller.bgmVolume * 100).round()}%'),
-          ),
-          SwitchListTile(
-            value: controller.ambientEnabled,
-            onChanged: controller.setAmbientEnabled,
-            secondary: const Icon(Icons.forest_outlined),
-            title: Text(language.text('环境音', 'Ambient sound', '環境音')),
-            subtitle: Text(
-              language.text(
-                '根据白天或夜晚切换环境声',
-                'Change ambience for day and night',
-                '昼夜に合わせて環境音を変更',
+            ListTile(
+              leading: const Icon(Icons.volume_up_outlined),
+              title: Text(language.text('语音音量', 'Voice volume', '音声音量')),
+              subtitle: PlatformSlider(
+                value: controller.voiceVolume,
+                onChanged: controller.voiceEnabled
+                    ? controller.setVoiceVolume
+                    : null,
+              ),
+              trailing: SizedBox(
+                width: 42,
+                child: Text(
+                  '${(controller.voiceVolume * 100).round()}%',
+                  textAlign: TextAlign.end,
+                ),
               ),
             ),
-          ),
-          ListTile(
-            leading: const Icon(Icons.surround_sound_outlined),
-            title: Text(language.text('环境音量', 'Ambient volume', '環境音量')),
-            subtitle: PlatformSlider(
-              value: controller.ambientVolume,
-              onChanged: controller.ambientEnabled
-                  ? controller.setAmbientVolume
-                  : null,
+            SwitchListTile(
+              value: controller.bgmEnabled,
+              onChanged: controller.setBgmEnabled,
+              secondary: const Icon(Icons.music_note_outlined),
+              title: Text(language.text('背景音乐', 'Background music', 'BGM')),
+              subtitle: Text(
+                language.text(
+                  '循环播放工房主题音乐',
+                  'Loop the atelier theme',
+                  'アトリエのテーマをループ再生',
+                ),
+              ),
             ),
-            trailing: Text('${(controller.ambientVolume * 100).round()}%'),
-          ),
-          const Divider(indent: 16, endIndent: 16),
-          _SectionLabel(language.text('用户设定', 'User profile', 'ユーザー設定')),
-          Card(
-            margin: const EdgeInsets.fromLTRB(12, 4, 12, 12),
-            child: ListTile(
-              leading: const Icon(Icons.badge_outlined),
+            ListTile(
+              leading: const Icon(Icons.music_note),
+              title: Text(language.text('音乐音量', 'Music volume', 'BGM音量')),
+              subtitle: PlatformSlider(
+                value: controller.bgmVolume,
+                onChanged: controller.bgmEnabled
+                    ? controller.setBgmVolume
+                    : null,
+              ),
+              trailing: Text('${(controller.bgmVolume * 100).round()}%'),
+            ),
+            SwitchListTile(
+              value: controller.ambientEnabled,
+              onChanged: controller.setAmbientEnabled,
+              secondary: const Icon(Icons.forest_outlined),
+              title: Text(language.text('环境音', 'Ambient sound', '環境音')),
+              subtitle: Text(
+                language.text(
+                  '根据白天或夜晚切换环境声',
+                  'Change ambience for day and night',
+                  '昼夜に合わせて環境音を変更',
+                ),
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.surround_sound_outlined),
+              title: Text(language.text('环境音量', 'Ambient volume', '環境音量')),
+              subtitle: PlatformSlider(
+                value: controller.ambientVolume,
+                onChanged: controller.ambientEnabled
+                    ? controller.setAmbientVolume
+                    : null,
+              ),
+              trailing: Text('${(controller.ambientVolume * 100).round()}%'),
+            ),
+            const Divider(indent: 16, endIndent: 16),
+            _SectionLabel(language.text('用户设定', 'User profile', 'ユーザー設定')),
+            Card(
+              margin: const EdgeInsets.fromLTRB(12, 4, 12, 12),
+              child: ListTile(
+                leading: const Icon(Icons.badge_outlined),
+                title: Text(
+                  language.text(
+                    '称呼与自画像',
+                    'Name and self-description',
+                    '呼び方とプロフィール',
+                  ),
+                ),
+                subtitle: Text(
+                  '${controller.userAddress} · ${controller.userRelationshipRole.label} · ${controller.userInteractionStyle.label}',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => _showUserProfileSettings(context),
+              ),
+            ),
+            const Divider(indent: 16, endIndent: 16),
+            _SectionLabel(language.text('AI 对话', 'AI chat', 'AI会話')),
+            ListTile(
+              leading: const Icon(Icons.auto_awesome_outlined),
               title: Text(
                 language.text(
-                  '称呼与自画像',
-                  'Name and self-description',
-                  '呼び方とプロフィール',
+                  'OpenAI 兼容接口',
+                  'OpenAI-compatible API',
+                  'OpenAI互換API',
                 ),
               ),
               subtitle: Text(
-                '${controller.userAddress} · ${controller.userRelationshipRole.label} · ${controller.userInteractionStyle.label}',
+                controller.aiEnabled &&
+                        controller.llmProvider == LlmProvider.openAiCompatible
+                    ? '${controller.openAiModel}\n${controller.openAiBaseUrl}'
+                    : language.text('未选用', 'Not selected', '未選択'),
+              ),
+              isThreeLine:
+                  controller.aiEnabled &&
+                  controller.llmProvider == LlmProvider.openAiCompatible,
+              trailing:
+                  controller.aiEnabled &&
+                      controller.llmProvider == LlmProvider.openAiCompatible
+                  ? const Icon(Icons.check_circle_outline)
+                  : const Icon(Icons.chevron_right),
+              onTap: () => _showAiSettings(context),
+            ),
+            ListTile(
+              leading: const Icon(Icons.diamond_outlined),
+              title: const Text('Google Gemini'),
+              subtitle: Text(
+                controller.aiEnabled &&
+                        controller.llmProvider == LlmProvider.gemini
+                    ? '${controller.geminiModel}\n${controller.geminiBaseUrl}'
+                    : language.text('未选用', 'Not selected', '未選択'),
+              ),
+              isThreeLine:
+                  controller.aiEnabled &&
+                  controller.llmProvider == LlmProvider.gemini,
+              trailing:
+                  controller.aiEnabled &&
+                      controller.llmProvider == LlmProvider.gemini
+                  ? const Icon(Icons.check_circle_outline)
+                  : const Icon(Icons.chevron_right),
+              onTap: () => _showGeminiSettings(context),
+            ),
+            ListTile(
+              enabled:
+                  controller.aiEnabled &&
+                  controller.supportsOpenAiAdvancedControls,
+              leading: const Icon(Icons.tune_rounded),
+              title: Text(
+                language.text(
+                  'GPT 推理与输出',
+                  'GPT reasoning and output',
+                  'GPT推論と出力',
+                ),
+              ),
+              subtitle: Text(
+                !controller.aiEnabled
+                    ? language.text(
+                        '启用真实 AI 对话后可配置',
+                        'Enable AI chat to configure',
+                        'AI会話を有効にすると設定できます',
+                      )
+                    : !controller.supportsOpenAiAdvancedControls
+                    ? language.text(
+                        '仅 GPT-5 系列模型可用',
+                        'Available for GPT-5 models only',
+                        'GPT-5シリーズのみ利用可能',
+                      )
+                    : controller.openAiAdvancedEnabled
+                    ? '${controller.openAiReasoningEffort.label} · ${controller.openAiOutputMultiplier}x 输出'
+                    : language.text('关闭', 'Off', 'オフ'),
+              ),
+              trailing: const Icon(Icons.chevron_right),
+              onTap:
+                  controller.aiEnabled &&
+                      controller.supportsOpenAiAdvancedControls
+                  ? () => _showOpenAiAdvancedSettings(context)
+                  : null,
+            ),
+            SwitchListTile(
+              value: controller.agentEnabled,
+              onChanged: controller.aiEnabled
+                  ? controller.setAgentEnabled
+                  : null,
+              secondary: const Icon(Icons.travel_explore_rounded),
+              title: Text(language.text('联网 Agent', 'Web agent', 'ウェブエージェント')),
+              subtitle: Text(
+                language.text(
+                  '允许模型调用只读网页搜索工具，最多执行两轮',
+                  'Allow up to two rounds of read-only web search',
+                  '読み取り専用ウェブ検索を最大2回許可',
+                ),
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.forum_outlined),
+              title: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      language.text(
+                        'NPC 互动频率',
+                        'NPC interaction frequency',
+                        'NPC会話頻度',
+                      ),
+                    ),
+                  ),
+                  Text(
+                    controller.npcInteractionFrequency.label(language),
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.primary,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
+              ),
+              subtitle: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  PlatformSlider(
+                    value: controller.npcInteractionFrequency.index.toDouble(),
+                    min: 0,
+                    max: (NpcInteractionFrequency.values.length - 1).toDouble(),
+                    divisions: NpcInteractionFrequency.values.length - 1,
+                    label: controller.npcInteractionFrequency.label(language),
+                    onChanged: (value) => controller.setNpcInteractionFrequency(
+                      NpcInteractionFrequency.values[value.round()],
+                    ),
+                  ),
+                  Text(
+                    language.text(
+                      '控制地图候选角色主动搭话、追问和回应现场事件的频率，不改变人物设定。',
+                      'Controls how often nearby NPCs join in without changing their profiles.',
+                      '周辺NPCが会話に加わる頻度を調整します。人物設定は変更しません。',
+                    ),
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                ],
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.psychology_alt_outlined),
+              title: Text(language.text('长期记忆', 'Long-term memory', '長期記憶')),
+              subtitle: Text(
+                controller.memorySummary.isEmpty
+                    ? language.text(
+                        '暂无记忆 · 每 4 轮对话自动整理',
+                        'No memory yet · summarized every 4 turns',
+                        '記憶なし · 4ターンごとに要約',
+                      )
+                    : controller.memorySummary,
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
               ),
-              trailing: const Icon(Icons.chevron_right),
-              onTap: () => _showUserProfileSettings(context),
-            ),
-          ),
-          const Divider(indent: 16, endIndent: 16),
-          _SectionLabel(language.text('AI 对话', 'AI chat', 'AI会話')),
-          ListTile(
-            leading: const Icon(Icons.auto_awesome_outlined),
-            title: Text(
-              language.text(
-                'OpenAI 兼容接口',
-                'OpenAI-compatible API',
-                'OpenAI互換API',
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Switch(
+                    value: controller.longTermMemoryEnabled,
+                    onChanged: controller.setLongTermMemoryEnabled,
+                  ),
+                  const Icon(Icons.chevron_right),
+                ],
               ),
+              onTap: () => _showLongTermMemorySettings(context),
             ),
-            subtitle: Text(
-              controller.aiEnabled
-                  ? '${controller.openAiModel}\n${controller.openAiBaseUrl}'
-                  : language.text('未启用', 'Disabled', '無効'),
-            ),
-            isThreeLine: controller.aiEnabled,
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => _showAiSettings(context),
-          ),
-          ListTile(
-            enabled:
-                controller.aiEnabled &&
-                controller.supportsOpenAiAdvancedControls,
-            leading: const Icon(Icons.tune_rounded),
-            title: Text(
-              language.text(
-                'GPT 推理与输出',
-                'GPT reasoning and output',
-                'GPT推論と出力',
+            ListTile(
+              leading: const Icon(Icons.favorite_border),
+              title: Text(
+                language.text('角色状态', 'Character status', 'キャラクター状態'),
               ),
-            ),
-            subtitle: Text(
-              !controller.aiEnabled
-                  ? language.text(
-                      '启用真实 AI 对话后可配置',
-                      'Enable AI chat to configure',
-                      'AI会話を有効にすると設定できます',
-                    )
-                  : !controller.supportsOpenAiAdvancedControls
-                  ? language.text(
-                      '仅 GPT-5 系列模型可用',
-                      'Available for GPT-5 models only',
-                      'GPT-5シリーズのみ利用可能',
-                    )
-                  : controller.openAiAdvancedEnabled
-                  ? '${controller.openAiReasoningEffort.label} · ${controller.openAiOutputMultiplier}x 输出'
-                  : language.text('关闭', 'Off', 'オフ'),
-            ),
-            trailing: const Icon(Icons.chevron_right),
-            onTap:
-                controller.aiEnabled &&
-                    controller.supportsOpenAiAdvancedControls
-                ? () => _showOpenAiAdvancedSettings(context)
-                : null,
-          ),
-          SwitchListTile(
-            value: controller.agentEnabled,
-            onChanged: controller.aiEnabled ? controller.setAgentEnabled : null,
-            secondary: const Icon(Icons.travel_explore_rounded),
-            title: Text(language.text('联网 Agent', 'Web agent', 'ウェブエージェント')),
-            subtitle: Text(
-              language.text(
-                '允许模型调用只读网页搜索工具，最多执行两轮',
-                'Allow up to two rounds of read-only web search',
-                '読み取り専用ウェブ検索を最大2回許可',
-              ),
-            ),
-          ),
-          ListTile(
-            leading: const Icon(Icons.psychology_alt_outlined),
-            title: Text(language.text('长期记忆', 'Long-term memory', '長期記憶')),
-            subtitle: Text(
-              controller.memorySummary.isEmpty
-                  ? language.text(
-                      '暂无记忆 · 每 4 轮对话自动整理',
-                      'No memory yet · summarized every 4 turns',
-                      '記憶なし · 4ターンごとに要約',
-                    )
-                  : controller.memorySummary,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-            ),
-            trailing: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Switch(
-                  value: controller.longTermMemoryEnabled,
-                  onChanged: controller.setLongTermMemoryEnabled,
+              subtitle: Text(
+                language.text(
+                  '${controller.characterMood.label} · 关系点数 ${controller.relationshipPoints}',
+                  '${controller.characterMood.label} · Bond ${controller.relationshipPoints}',
+                  '${controller.characterMood.label} · 親密度 ${controller.relationshipPoints}',
                 ),
-                const Icon(Icons.chevron_right),
-              ],
-            ),
-            onTap: () => _showLongTermMemorySettings(context),
-          ),
-          ListTile(
-            leading: const Icon(Icons.favorite_border),
-            title: Text(language.text('角色状态', 'Character status', 'キャラクター状態')),
-            subtitle: Text(
-              language.text(
-                '${controller.characterMood.label} · 关系点数 ${controller.relationshipPoints}',
-                '${controller.characterMood.label} · Bond ${controller.relationshipPoints}',
-                '${controller.characterMood.label} · 親密度 ${controller.relationshipPoints}',
               ),
             ),
-          ),
-          const Divider(indent: 16, endIndent: 16),
-          _SectionLabel(language.text('语音合成', 'Speech synthesis', '音声合成')),
-          ListTile(
-            leading: const Icon(Icons.graphic_eq_rounded),
-            title: Text(language.text('AI 回复语音', 'AI reply voice', 'AI返答音声')),
-            subtitle: Text(
-              controller.fishTtsEnabled
-                  ? '${controller.ttsProvider.label} · ${_activeTtsModel(controller)}'
-                  : language.text('未启用', 'Disabled', '無効'),
+            const Divider(indent: 16, endIndent: 16),
+            _SectionLabel(language.text('语音合成', 'Speech synthesis', '音声合成')),
+            ListTile(
+              leading: const Icon(Icons.graphic_eq_rounded),
+              title: Text(language.text('AI 回复语音', 'AI reply voice', 'AI返答音声')),
+              subtitle: Text(
+                controller.fishTtsEnabled
+                    ? '${controller.ttsProvider.label} · ${_activeTtsModel(controller)}'
+                    : language.text('未启用', 'Disabled', '無効'),
+              ),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => _showTtsSettings(context),
             ),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => _showTtsSettings(context),
-          ),
-          const Divider(indent: 16, endIndent: 16),
-          _SectionLabel(language.text('数据', 'Data', 'データ')),
-          ListTile(
-            leading: const Icon(Icons.history_outlined),
-            title: Text(language.text('聊天记录', 'Chat history', '会話履歴')),
-            subtitle: Text(
-              language.text(
-                '本机保存 ${controller.messages.length} 条消息',
-                '${controller.messages.length} messages stored locally',
-                '${controller.messages.length}件のメッセージを端末に保存',
+            const Divider(indent: 16, endIndent: 16),
+            _SectionLabel(language.text('数据', 'Data', 'データ')),
+            ListTile(
+              leading: const Icon(Icons.history_outlined),
+              title: Text(language.text('聊天记录', 'Chat history', '会話履歴')),
+              subtitle: Text(
+                language.text(
+                  '本机保存 ${controller.messages.length} 条消息',
+                  '${controller.messages.length} messages stored locally',
+                  '${controller.messages.length}件のメッセージを端末に保存',
+                ),
               ),
             ),
-          ),
-          ListTile(
-            leading: const Icon(Icons.file_upload_outlined),
-            title: Text(
-              language.text('导出本地数据', 'Export local data', 'ローカルデータを書き出す'),
+            ListTile(
+              leading: const Icon(Icons.file_upload_outlined),
+              title: Text(
+                language.text('导出本地数据', 'Export local data', 'ローカルデータを書き出す'),
+              ),
+              subtitle: Text(
+                language.text(
+                  '不包含任何 AI 或语音服务 API Key',
+                  'API keys are never included',
+                  'APIキーは含まれません',
+                ),
+              ),
+              onTap: () => _exportData(context),
             ),
-            subtitle: Text(
-              language.text(
-                '不包含任何 AI 或语音服务 API Key',
-                'API keys are never included',
-                'APIキーは含まれません',
+            ListTile(
+              leading: const Icon(Icons.file_download_outlined),
+              title: Text(
+                language.text('导入本地数据', 'Import local data', 'ローカルデータを読み込む'),
+              ),
+              subtitle: Text(
+                language.text(
+                  '从 AgentAtelierR JSON 备份恢复',
+                  'Restore an AgentAtelierR JSON backup',
+                  'AgentAtelierRのJSONバックアップから復元',
+                ),
+              ),
+              onTap: () => _importData(context),
+            ),
+            ListTile(
+              leading: const Icon(Icons.delete_outline),
+              title: Text(
+                language.text('清除聊天记录', 'Clear chat history', '会話履歴を消去'),
+              ),
+              subtitle: Text(
+                language.text(
+                  '任务和地图进度不会受到影响',
+                  'Mission and map progress are preserved',
+                  'ミッションとマップの進行状況は保持されます',
+                ),
+              ),
+              onTap: () => _confirmClearHistory(context),
+            ),
+            const Divider(indent: 16, endIndent: 16),
+            _SectionLabel(language.text('关于', 'About', 'このアプリについて')),
+            ListTile(
+              leading: const Icon(Icons.info_outline),
+              title: const Text('AgentAtelierR'),
+              subtitle: Text(
+                language.text('版本 0.7.0', 'Version 0.7.0', 'バージョン 0.7.0'),
               ),
             ),
-            onTap: () => _exportData(context),
-          ),
-          ListTile(
-            leading: const Icon(Icons.file_download_outlined),
-            title: Text(
-              language.text('导入本地数据', 'Import local data', 'ローカルデータを読み込む'),
-            ),
-            subtitle: Text(
-              language.text(
-                '从 Ryza Chat JSON 备份恢复',
-                'Restore a Ryza Chat JSON backup',
-                'Ryza ChatのJSONバックアップから復元',
+            Padding(
+              padding: const EdgeInsets.fromLTRB(72, 0, 24, 12),
+              child: Text(
+                language.text(
+                  '当前仅用于本地原型验证。角色、美术、语音资源请仅在合法授权范围内使用。',
+                  'Local prototype only. Use character, artwork, and voice assets only with proper authorization.',
+                  'ローカル試作版です。キャラクター、画像、音声素材は適切な許諾の範囲でのみ使用してください。',
+                ),
+                style: TextStyle(
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  fontSize: 12,
+                  height: 1.5,
+                ),
               ),
             ),
-            onTap: () => _importData(context),
-          ),
-          ListTile(
-            leading: const Icon(Icons.delete_outline),
-            title: Text(
-              language.text('清除聊天记录', 'Clear chat history', '会話履歴を消去'),
-            ),
-            subtitle: Text(
-              language.text(
-                '任务和地图进度不会受到影响',
-                'Mission and map progress are preserved',
-                'ミッションとマップの進行状況は保持されます',
-              ),
-            ),
-            onTap: () => _confirmClearHistory(context),
-          ),
-          const Divider(indent: 16, endIndent: 16),
-          _SectionLabel(language.text('关于', 'About', 'このアプリについて')),
-          ListTile(
-            leading: const Icon(Icons.info_outline),
-            title: const Text('Ryza Chat Prototype'),
-            subtitle: Text(
-              language.text(
-                '版本 0.5.0 · 主题与三语支持',
-                'Version 0.5.0 · Themes and 3 languages',
-                'バージョン 0.5.0 · テーマと3言語対応',
-              ),
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(72, 0, 24, 12),
-            child: Text(
-              language.text(
-                '当前仅用于本地原型验证。角色、美术、语音资源请仅在合法授权范围内使用。',
-                'Local prototype only. Use character, artwork, and voice assets only with proper authorization.',
-                'ローカル試作版です。キャラクター、画像、音声素材は適切な許諾の範囲でのみ使用してください。',
-              ),
-              style: TextStyle(
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
-                fontSize: 12,
-                height: 1.5,
-              ),
-            ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -517,6 +602,8 @@ class SettingsScreen extends StatelessWidget {
         portrait: controller.userPortrait,
         relationshipRole: controller.userRelationshipRole,
         interactionStyle: controller.userInteractionStyle,
+        relationshipCustom: controller.userRelationshipCustom,
+        interactionCustom: controller.userInteractionCustom,
         boundaries: controller.userInteractionBoundaries,
       ),
     );
@@ -526,6 +613,8 @@ class SettingsScreen extends StatelessWidget {
       portrait: result.portrait,
       relationshipRole: result.relationshipRole,
       interactionStyle: result.interactionStyle,
+      relationshipCustom: result.relationshipCustom,
+      interactionCustom: result.interactionCustom,
       boundaries: result.boundaries,
     );
   }
@@ -534,7 +623,9 @@ class SettingsScreen extends StatelessWidget {
     final baseUrl = TextEditingController(text: controller.openAiBaseUrl);
     final model = TextEditingController(text: controller.openAiModel);
     final apiKey = TextEditingController();
-    var enabled = controller.aiEnabled;
+    var enabled =
+        controller.aiEnabled &&
+        controller.llmProvider == LlmProvider.openAiCompatible;
     final result = await showDialog<bool>(
       context: context,
       builder: (context) => StatefulBuilder(
@@ -578,9 +669,12 @@ class SettingsScreen extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(height: 8),
-                const Text(
+                Text(
                   '接口使用 /chat/completions 与 SSE 流式增量。Key 保存在系统安全存储。',
-                  style: TextStyle(color: Colors.black54, fontSize: 12),
+                  style: TextStyle(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    fontSize: 12,
+                  ),
                 ),
               ],
             ),
@@ -617,6 +711,101 @@ class SettingsScreen extends StatelessWidget {
     );
     if (apiKey.text.trim().isNotEmpty) {
       await const SecretStore().writeOpenAiKey(apiKey.text);
+    }
+  }
+
+  Future<void> _showGeminiSettings(BuildContext context) async {
+    final baseUrl = TextEditingController(text: controller.geminiBaseUrl);
+    final model = TextEditingController(text: controller.geminiModel);
+    final apiKey = TextEditingController();
+    var enabled =
+        controller.aiEnabled && controller.llmProvider == LlmProvider.gemini;
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('Google Gemini'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  value: enabled,
+                  onChanged: (value) => setDialogState(() => enabled = value),
+                  title: const Text('设为当前 AI 对话服务'),
+                ),
+                TextField(
+                  controller: baseUrl,
+                  keyboardType: TextInputType.url,
+                  decoration: const InputDecoration(
+                    labelText: 'Base URL',
+                    hintText: 'https://generativelanguage.googleapis.com/v1beta/openai',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: model,
+                  decoration: const InputDecoration(
+                    labelText: 'Gemini 模型名称',
+                    hintText: 'gemini-3.8-flash',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: apiKey,
+                  obscureText: true,
+                  decoration: const InputDecoration(
+                    labelText: 'Gemini API Key',
+                    hintText: '留空则保留当前 Key',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  '使用 Gemini 官方 OpenAI 兼容 /chat/completions 接口。Key 仅保存在系统安全存储，不会进入本地备份。',
+                  style: TextStyle(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            _DialogActionRow(
+              children: [
+                TextButton(
+                  onPressed: () async {
+                    await const SecretStore().writeGeminiKey('');
+                    if (context.mounted) Navigator.pop(context, false);
+                  },
+                  child: const Text('清除 Key'),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.pop(context, false),
+                  child: const Text('取消'),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.pop(context, true),
+                  child: const Text('保存并选用'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+    if (result != true) return;
+    controller.configureGemini(
+      enabled: enabled,
+      baseUrl: baseUrl.text,
+      model: model.text,
+    );
+    if (apiKey.text.trim().isNotEmpty) {
+      await const SecretStore().writeGeminiKey(apiKey.text);
     }
   }
 
@@ -675,9 +864,12 @@ class SettingsScreen extends StatelessWidget {
                     : null,
               ),
               const SizedBox(height: 10),
-              const Text(
+              Text(
                 '倍率对应最大输出 token 预算。兼容接口必须支持 reasoning_effort 和 max_completion_tokens。',
-                style: TextStyle(color: Colors.black54, fontSize: 12),
+                style: TextStyle(
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  fontSize: 12,
+                ),
               ),
             ],
           ),
@@ -709,7 +901,7 @@ class SettingsScreen extends StatelessWidget {
   Future<void> _showTtsSettings(BuildContext context) async {
     final provider = await showModalBottomSheet<TtsProvider>(
       context: context,
-      backgroundColor: const Color(0xFFF8F6F1),
+      backgroundColor: Theme.of(context).colorScheme.surface,
       showDragHandle: true,
       builder: (context) => SafeArea(
         top: false,
@@ -755,6 +947,10 @@ class SettingsScreen extends StatelessWidget {
     final referenceId = TextEditingController(
       text: controller.fishAudioReferenceId,
     );
+    final endpoint = TextEditingController(text: controller.fishAudioBaseUrl);
+    final modelController = TextEditingController(
+      text: controller.fishAudioModel,
+    );
     final asmrReferenceId = TextEditingController(
       text: controller.fishAudioAsmrReferenceId,
     );
@@ -763,9 +959,6 @@ class SettingsScreen extends StatelessWidget {
     final player = AudioPlayer();
     var enabled = controller.fishTtsEnabled;
     var model = controller.fishAudioModel;
-    if (!const {'s2-pro', 's2.1-pro', 's2.1-pro-free'}.contains(model)) {
-      model = 's2-pro';
-    }
     var format = controller.fishAudioFormat;
     var latency = controller.fishAudioLatency;
     var speed = controller.fishAudioSpeed;
@@ -811,43 +1004,22 @@ class SettingsScreen extends StatelessWidget {
                       onChanged: (value) =>
                           setDialogState(() => cueDensity = value),
                     ),
-                    const InputDecorator(
-                      decoration: InputDecoration(
-                        labelText: '官方 API 端点',
+                    TextField(
+                      controller: endpoint,
+                      decoration: const InputDecoration(
+                        labelText: 'API 端点',
                         border: OutlineInputBorder(),
                       ),
-                      child: SelectableText(FishAudioClient.endpoint),
                     ),
                     const SizedBox(height: 12),
-                    DropdownButtonFormField<String>(
-                      initialValue: model,
-                      isExpanded: true,
+                    TextField(
+                      controller: modelController,
+                      onChanged: (value) => model = value,
                       decoration: const InputDecoration(
                         labelText: 'TTS 模型',
+                        hintText: 's2-pro',
                         border: OutlineInputBorder(),
                       ),
-                      items: const [
-                        DropdownMenuItem(
-                          value: 's2-pro',
-                          child: Text('s2-pro'),
-                        ),
-                        DropdownMenuItem(
-                          value: 's2.1-pro',
-                          child: Text('s2.1-pro'),
-                        ),
-                        DropdownMenuItem(
-                          value: 's2.1-pro-free',
-                          child: Text('s2.1-pro-free（开发者免费层）'),
-                        ),
-                      ],
-                      selectedItemBuilder: (context) => const [
-                        Text('s2-pro', overflow: TextOverflow.ellipsis),
-                        Text('s2.1-pro', overflow: TextOverflow.ellipsis),
-                        Text('s2.1-pro-free', overflow: TextOverflow.ellipsis),
-                      ],
-                      onChanged: (value) {
-                        if (value != null) setDialogState(() => model = value);
-                      },
                     ),
                     const SizedBox(height: 12),
                     TextField(
@@ -976,9 +1148,15 @@ class SettingsScreen extends StatelessWidget {
                         final key = apiKey.text.trim().isNotEmpty
                             ? apiKey.text.trim()
                             : await const SecretStore().readFishAudioKey();
-                        if (key.isEmpty || referenceId.text.trim().isEmpty) {
+                        final referenceForTest =
+                            switch (controller.ttsVoiceMode) {
+                              TtsVoiceMode.normal => referenceId.text.trim(),
+                              TtsVoiceMode.asmr => asmrReferenceId.text.trim(),
+                            };
+                        if (key.isEmpty || referenceForTest.isEmpty) {
                           setDialogState(
-                            () => testError = '请先填写 API Key 和 reference_id',
+                            () => testError =
+                                '请先填写 API Key 和当前模式的 Voice model ID',
                           );
                           return;
                         }
@@ -989,7 +1167,7 @@ class SettingsScreen extends StatelessWidget {
                         try {
                           final path = await FishAudioClient().synthesize(
                             apiKey: key,
-                            referenceId: referenceId.text.trim(),
+                            referenceId: referenceForTest,
                             text: applyFishEmotionIntensityPerSentence(
                               ensureFishEmotionCue(
                                 previewText.text.trim(),
@@ -1003,6 +1181,7 @@ class SettingsScreen extends StatelessWidget {
                             latency: latency,
                             speed: speed,
                             temperature: emotionIntensity.fishTemperature,
+                            baseUrl: endpoint.text.trim(),
                           );
                           await player.stop();
                           await player.setVolume(controller.voiceVolume);
@@ -1051,6 +1230,7 @@ class SettingsScreen extends StatelessWidget {
       format: format,
       latency: latency,
       speed: speed,
+      baseUrl: endpoint.text,
       emotionIntensity: emotionIntensity,
     );
     controller.setTtsCueDensity(cueDensity);
@@ -1062,6 +1242,11 @@ class SettingsScreen extends StatelessWidget {
   Future<void> _showDashScopeSettings(BuildContext context) async {
     final baseUrl = TextEditingController(text: controller.dashScopeTtsBaseUrl);
     final model = TextEditingController(text: controller.dashScopeTtsModel);
+    final cloneTargetModel = TextEditingController(
+      text: controller.dashScopeTtsModel.contains('-vc-')
+          ? controller.dashScopeTtsModel
+          : 'qwen3-tts-vc-realtime-2026-01-15',
+    );
     final voice = TextEditingController(text: controller.dashScopeTtsVoice);
     final asmrVoice = TextEditingController(
       text: controller.dashScopeTtsAsmrVoice,
@@ -1071,12 +1256,19 @@ class SettingsScreen extends StatelessWidget {
     );
     final preview = TextEditingController(text: controller.ttsPreviewText);
     final key = TextEditingController();
+    final preferredName = TextEditingController(text: 'ryza_voice');
+    final audioText = TextEditingController();
+    PlatformFile? referenceAudio;
+    Uint8List? referenceAudioBytes;
+    var referenceAudioSize = 0;
     final player = AudioPlayer();
     var enabled = controller.fishTtsEnabled;
     var language = controller.dashScopeTtsLanguage;
     var emotionIntensity = controller.ttsEmotionIntensity;
     var cueDensity = controller.ttsCueDensity;
     var testing = false;
+    var creatingVoice = false;
+    String? createdVoiceId;
     String? error;
     final saved = await showDialog<bool>(
       context: context,
@@ -1095,6 +1287,29 @@ class SettingsScreen extends StatelessWidget {
                     onChanged: (value) => setDialogState(() => enabled = value),
                     title: const Text('AI 回复后自动播放'),
                   ),
+                  TextField(
+                    controller: key,
+                    obscureText: true,
+                    decoration: const InputDecoration(
+                      labelText: 'DashScope API Key',
+                      hintText: '留空则保留当前 Key',
+                      helperText: '创建音色和试音共用此 Key，仅保存在系统安全存储',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  const Divider(),
+                  const Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      '语音合成设置',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
                   _TtsEmotionSlider(
                     value: emotionIntensity,
                     onChanged: (value) =>
@@ -1118,7 +1333,7 @@ class SettingsScreen extends StatelessWidget {
                     decoration: const InputDecoration(
                       labelText: '模型',
                       hintText: 'qwen3-tts-flash',
-                      helperText: '指令控制可使用 qwen3-tts-instruct-flash',
+                      helperText: '创建音色时的目标模型必须与之后合成使用的模型同系列',
                       border: OutlineInputBorder(),
                     ),
                   ),
@@ -1131,6 +1346,205 @@ class SettingsScreen extends StatelessWidget {
                       border: OutlineInputBorder(),
                     ),
                   ),
+                  const SizedBox(height: 16),
+                  const Divider(),
+                  const Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      '创建自定义音色',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      '1. 选择复刻目标模型  2. 选择参考音频  3. 填写音色信息  4. 创建并自动回填',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: cloneTargetModel,
+                    decoration: const InputDecoration(
+                      labelText: '第 1 步：复刻目标模型',
+                      hintText: 'qwen3-tts-vc-realtime-2026-01-15',
+                      helperText: '按百炼控制台可用模型填写；创建成功后会同步到上方合成模型',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: preferredName,
+                    decoration: const InputDecoration(
+                      labelText: '自定义音色名称',
+                      helperText: '仅数字、英文字母和下划线，最多 16 个字符',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: audioText,
+                    decoration: const InputDecoration(
+                      labelText: '参考音频文本（可选）',
+                      helperText: '填写音频中实际说的内容，可提升复刻稳定性',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          referenceAudio == null
+                              ? '第 2 步：尚未选择参考音频'
+                              : '已选择：${referenceAudio!.name}\n${(referenceAudioSize / 1024 / 1024).toStringAsFixed(2)} MB · 格式和大小符合要求',
+                          overflow: TextOverflow.ellipsis,
+                          maxLines: 2,
+                        ),
+                      ),
+                      OutlinedButton.icon(
+                        icon: const Icon(Icons.audio_file_outlined),
+                        label: const Text('选择音频'),
+                        onPressed: () async {
+                          final result = await FilePicker.pickFiles(
+                            type: FileType.custom,
+                            allowedExtensions: ['wav', 'mp3', 'm4a'],
+                          );
+                          if (result.isNotEmpty) {
+                            final selected = result.first;
+                            final bytes = await selected.readAsBytes();
+                            if (bytes.length < 10 * 1024 * 1024) {
+                              setDialogState(() {
+                                referenceAudio = selected;
+                                referenceAudioBytes = bytes;
+                                referenceAudioSize = bytes.length;
+                                createdVoiceId = null;
+                                error = null;
+                              });
+                            } else {
+                              setDialogState(() => error = '参考音频必须小于 10MB');
+                            }
+                          }
+                        },
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: OutlinedButton.icon(
+                      icon: creatingVoice
+                          ? const SizedBox.square(
+                              dimension: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.auto_fix_high_outlined),
+                      label: Text(
+                        creatingVoice ? '正在创建音色...' : '创建音色并自动回填 Voice ID',
+                      ),
+                      onPressed: testing || creatingVoice
+                          ? null
+                          : () async {
+                              final apiKey = key.text.trim().isNotEmpty
+                                  ? key.text.trim()
+                                  : await const SecretStore()
+                                        .readDashScopeKey();
+                              final bytes = referenceAudioBytes;
+                              final name = preferredName.text.trim();
+                              if (cloneTargetModel.text.trim().isEmpty) {
+                                setDialogState(
+                                  () => error = '请先填写用于声音复刻和合成的目标模型',
+                                );
+                                return;
+                              }
+                              if (apiKey.isEmpty ||
+                                  bytes == null ||
+                                  name.isEmpty) {
+                                setDialogState(
+                                  () => error = '请填写 API Key、音色名称并选择参考音频',
+                                );
+                                return;
+                              }
+                              if (!RegExp(r'^[A-Za-z0-9_]{1,16}$')
+                                  .hasMatch(name)) {
+                                setDialogState(
+                                  () => error = '音色名称只能包含数字、英文字母和下划线，最多 16 个字符',
+                                );
+                                return;
+                              }
+                              setDialogState(() {
+                                creatingVoice = true;
+                                createdVoiceId = null;
+                                error = null;
+                              });
+                              try {
+                                final created = await DashScopeTtsClient()
+                                    .createQwenVoice(
+                                      apiKey: apiKey,
+                                      audioBytes: bytes,
+                                      mimeType: switch (referenceAudio!
+                                          .extension
+                                          ?.toLowerCase()) {
+                                        'mp3' => 'audio/mpeg',
+                                        'm4a' => 'audio/mp4',
+                                        _ => 'audio/wav',
+                                      },
+                                      preferredName: name,
+                                      targetModel: cloneTargetModel.text.trim(),
+                                      language: language,
+                                      audioText: audioText.text,
+                                      baseUrl: baseUrl.text,
+                                    );
+                                voice.text = created;
+                                model.text = cloneTargetModel.text.trim();
+                                setDialogState(() => createdVoiceId = created);
+                              } on Object catch (value) {
+                                setDialogState(() => error = value.toString());
+                              } finally {
+                                if (context.mounted) {
+                                  setDialogState(() => creatingVoice = false);
+                                }
+                              }
+                            },
+                    ),
+                  ),
+                  if (creatingVoice)
+                    const Padding(
+                      padding: EdgeInsets.only(top: 10),
+                      child: LinearProgressIndicator(),
+                    ),
+                  if (createdVoiceId != null)
+                    Container(
+                      width: double.infinity,
+                      margin: const EdgeInsets.only(top: 10),
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Colors.green.withValues(alpha: 0.10),
+                        border: Border.all(color: Colors.green),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.check_circle, color: Colors.green),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              '创建成功，已自动填入 Voice ID\n$createdVoiceId',
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
                   const SizedBox(height: 12),
                   TextField(
                     controller: asmrVoice,
@@ -1191,16 +1605,6 @@ class SettingsScreen extends StatelessWidget {
                             },
                           ),
                       ],
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: key,
-                    obscureText: true,
-                    decoration: const InputDecoration(
-                      labelText: 'DashScope API Key',
-                      hintText: '留空则保留当前 Key',
-                      border: OutlineInputBorder(),
                     ),
                   ),
                   const SizedBox(height: 12),
@@ -1527,7 +1931,7 @@ class SettingsScreen extends StatelessWidget {
     );
     final uri = await FilePicker.saveFile(
       fileName:
-          'ryza-chat-backup-${DateTime.now().millisecondsSinceEpoch}.json',
+          'agent-atelier-r-backup-${DateTime.now().millisecondsSinceEpoch}.json',
       bytes: bytes,
       mimeType: 'application/json',
     );
@@ -1864,6 +2268,8 @@ class _UserProfileDraft {
     required this.relationshipRole,
     required this.interactionStyle,
     required this.boundaries,
+    required this.relationshipCustom,
+    required this.interactionCustom,
   });
 
   final String address;
@@ -1871,6 +2277,8 @@ class _UserProfileDraft {
   final UserRelationshipRole relationshipRole;
   final UserInteractionStyle interactionStyle;
   final String boundaries;
+  final String relationshipCustom;
+  final String interactionCustom;
 }
 
 class _UserProfileDialog extends StatefulWidget {
@@ -1880,6 +2288,8 @@ class _UserProfileDialog extends StatefulWidget {
     required this.relationshipRole,
     required this.interactionStyle,
     required this.boundaries,
+    required this.relationshipCustom,
+    required this.interactionCustom,
   });
 
   final String address;
@@ -1887,6 +2297,8 @@ class _UserProfileDialog extends StatefulWidget {
   final UserRelationshipRole relationshipRole;
   final UserInteractionStyle interactionStyle;
   final String boundaries;
+  final String relationshipCustom;
+  final String interactionCustom;
 
   @override
   State<_UserProfileDialog> createState() => _UserProfileDialogState();
@@ -1898,6 +2310,8 @@ class _UserProfileDialogState extends State<_UserProfileDialog> {
   late final TextEditingController _boundaries;
   late UserRelationshipRole _relationshipRole;
   late UserInteractionStyle _interactionStyle;
+  late final TextEditingController _relationshipCustom;
+  late final TextEditingController _interactionCustom;
 
   @override
   void initState() {
@@ -1905,6 +2319,10 @@ class _UserProfileDialogState extends State<_UserProfileDialog> {
     _address = TextEditingController(text: widget.address);
     _portrait = TextEditingController(text: widget.portrait);
     _boundaries = TextEditingController(text: widget.boundaries);
+    _relationshipCustom = TextEditingController(
+      text: widget.relationshipCustom,
+    );
+    _interactionCustom = TextEditingController(text: widget.interactionCustom);
     _relationshipRole = widget.relationshipRole;
     _interactionStyle = widget.interactionStyle;
   }
@@ -1914,6 +2332,8 @@ class _UserProfileDialogState extends State<_UserProfileDialog> {
     _address.dispose();
     _portrait.dispose();
     _boundaries.dispose();
+    _relationshipCustom.dispose();
+    _interactionCustom.dispose();
     super.dispose();
   }
 
@@ -2001,6 +2421,30 @@ class _UserProfileDialogState extends State<_UserProfileDialog> {
                   border: OutlineInputBorder(),
                 ),
               ),
+              const SizedBox(height: 12),
+              ExpansionTile(
+                tilePadding: EdgeInsets.zero,
+                title: const Text('自定义关系与互动偏好（可选）'),
+                children: [
+                  TextField(
+                    controller: _relationshipCustom,
+                    decoration: const InputDecoration(
+                      labelText: '自定义关系定位',
+                      hintText: '例如：一起旅行的老朋友',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: _interactionCustom,
+                    decoration: const InputDecoration(
+                      labelText: '自定义互动偏好',
+                      hintText: '例如：多提问，多给行动建议',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ],
+              ),
             ],
           ),
         ),
@@ -2019,6 +2463,8 @@ class _UserProfileDialogState extends State<_UserProfileDialog> {
               relationshipRole: _relationshipRole,
               interactionStyle: _interactionStyle,
               boundaries: _boundaries.text,
+              relationshipCustom: _relationshipCustom.text,
+              interactionCustom: _interactionCustom.text,
             ),
           ),
           child: const Text('保存'),
@@ -2032,10 +2478,12 @@ class RuntimeLogScreen extends StatelessWidget {
   const RuntimeLogScreen({
     super.key,
     required this.language,
+    this.liquidGlass = false,
     required this.onMenuPressed,
   });
 
   final AppLanguage language;
+  final bool liquidGlass;
   final VoidCallback onMenuPressed;
 
   @override
@@ -2043,12 +2491,11 @@ class RuntimeLogScreen extends StatelessWidget {
     return Scaffold(
       backgroundColor: Theme.of(context).scaffoldBackgroundColor,
       appBar: AppBar(
-        leading: IconButton(
-          onPressed: onMenuPressed,
-          tooltip: language.text('菜单', 'Menu', 'メニュー'),
-          icon: const Icon(Icons.menu_rounded),
+        automaticallyImplyLeading: false,
+        title: Padding(
+          padding: const EdgeInsets.only(left: 58),
+          child: Text(language.text('运行日志', 'Runtime logs', '実行ログ')),
         ),
-        title: Text(language.text('运行日志', 'Runtime logs', '実行ログ')),
         actions: [
           AnimatedBuilder(
             animation: RuntimeLog.instance,
@@ -2080,46 +2527,56 @@ class RuntimeLogScreen extends StatelessWidget {
         animation: RuntimeLog.instance,
         builder: (context, _) {
           final entries = RuntimeLog.instance.entries.reversed.toList();
-          return Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  '记录 LLM/TTS 的结构化请求与响应；API Key、令牌和授权信息会自动脱敏，音频二进制不会记录。',
-                  style: TextStyle(
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
-                    fontSize: 13,
+          return GlassSurface(
+            liquidGlass: liquidGlass,
+            tone: Theme.of(context).brightness == Brightness.dark
+                ? GlassTone.dark
+                : GlassTone.light,
+            fallbackColor: Theme.of(context).brightness == Brightness.dark
+                ? const Color(0xD91C2222)
+                : const Color(0xB8EEF2F0),
+            borderRadius: BorderRadius.zero,
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '记录 LLM/TTS 的结构化请求与响应；API Key、令牌和授权信息会自动脱敏，音频二进制不会记录。',
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      fontSize: 13,
+                    ),
                   ),
-                ),
-                const SizedBox(height: 12),
-                Expanded(
-                  child: entries.isEmpty
-                      ? const Center(child: Text('暂无运行日志'))
-                      : DecoratedBox(
-                          decoration: BoxDecoration(
-                            color: Theme.of(context)
-                                .colorScheme
-                                .surfaceContainerHighest,
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: ListView.separated(
-                            padding: const EdgeInsets.all(16),
-                            itemCount: entries.length,
-                            separatorBuilder: (_, _) =>
-                                const Divider(height: 22),
-                            itemBuilder: (context, index) => SelectableText(
-                              entries[index].formatted,
-                              style: const TextStyle(
-                                fontFamily: 'monospace',
-                                fontSize: 12,
-                                height: 1.5,
+                  const SizedBox(height: 12),
+                  Expanded(
+                    child: entries.isEmpty
+                        ? const Center(child: Text('暂无运行日志'))
+                        : DecoratedBox(
+                            decoration: BoxDecoration(
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .surfaceContainerHighest,
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: ListView.separated(
+                              padding: const EdgeInsets.all(16),
+                              itemCount: entries.length,
+                              separatorBuilder: (_, _) =>
+                                  const Divider(height: 22),
+                              itemBuilder: (context, index) => SelectableText(
+                                entries[index].formatted,
+                                style: const TextStyle(
+                                  fontFamily: 'monospace',
+                                  fontSize: 12,
+                                  height: 1.5,
+                                ),
                               ),
                             ),
                           ),
-                        ),
-                ),
-              ],
+                  ),
+                ],
+              ),
             ),
           );
         },
@@ -2174,13 +2631,7 @@ class _TtsPreviewEditor extends StatelessWidget {
             height: 48,
             child: Row(
               children: [
-                Expanded(
-                  child: IconButton(
-                    onPressed: onClearKey,
-                    tooltip: '清除 Key',
-                    icon: const Icon(Icons.key_off_outlined),
-                  ),
-                ),
+                const Spacer(),
                 Expanded(
                   child: IconButton(
                     onPressed: testing ? null : onTest,
@@ -2193,20 +2644,22 @@ class _TtsPreviewEditor extends StatelessWidget {
                         : const Icon(Icons.play_arrow_rounded),
                   ),
                 ),
-                Expanded(
-                  child: IconButton(
-                    onPressed: onCancel,
-                    tooltip: '取消',
-                    icon: const Icon(Icons.close_rounded),
-                  ),
+              ],
+            ),
+          ),
+          const Divider(height: 1),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                IconButton(
+                  onPressed: onClearKey,
+                  tooltip: '清除 API Key',
+                  icon: const Icon(Icons.key_off_outlined),
                 ),
-                Expanded(
-                  child: IconButton.filled(
-                    onPressed: onSave,
-                    tooltip: '保存',
-                    icon: const Icon(Icons.check_rounded),
-                  ),
-                ),
+                TextButton(onPressed: onCancel, child: const Text('取消')),
+                FilledButton(onPressed: onSave, child: const Text('保存设置')),
               ],
             ),
           ),

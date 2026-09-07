@@ -2,17 +2,22 @@ import 'app_controller.dart';
 import 'character_expression.dart';
 import 'character_performance.dart';
 
-enum ChatSpeaker { narrator, ryza, translation }
+enum ChatSpeaker { narrator, ryza, character, translation }
 
 class ChatSegment {
-  const ChatSegment({required this.speaker, required this.text});
+  const ChatSegment({
+    required this.speaker,
+    required this.text,
+    this.characterId,
+  });
 
   final ChatSpeaker speaker;
   final String text;
+  final String? characterId;
 }
 
 final RegExp _speakerPrefix = RegExp(
-  r'^\s*(旁白|莱莎|译文)\s*[：:]\s*',
+  r'^\s*(旁白|莱莎|译文|角色\s*\[\s*([a-zA-Z0-9_-]+)\s*\])\s*[：:]\s*',
   multiLine: true,
 );
 final RegExp _fishCue = RegExp(r'\[[^\[\]\r\n]+\]');
@@ -41,7 +46,20 @@ const _deliveryCues = {
   'shouting',
   'screaming',
   'whispering',
+  'whisper',
+  'near-whisper',
   'soft tone',
+  'breathy',
+  'very breathy voice',
+  'extremely breathy voiced speech',
+  'low volume',
+  'low voice',
+  'soft intimate voice',
+  'soft breathy voice',
+  'airy voice',
+  'inhale',
+  'exhale',
+  'sigh',
   'emphasis',
   'laughing',
   'chuckling',
@@ -125,6 +143,7 @@ final RegExp _standaloneAction = RegExp(r'^\s*[（(].*[）)]\s*$');
 List<ChatSegment> parseAssistantSegments(String response) {
   final segments = <ChatSegment>[];
   ChatSpeaker? activeSpeaker;
+  String? activeCharacterId;
 
   for (final rawLine in response.replaceAll('\r\n', '\n').split('\n')) {
     final line = rawLine.trim();
@@ -135,11 +154,21 @@ List<ChatSegment> parseAssistantSegments(String response) {
       activeSpeaker = switch (prefix.group(1)) {
         '旁白' => ChatSpeaker.narrator,
         '译文' => ChatSpeaker.translation,
-        _ => ChatSpeaker.ryza,
+        '莱莎' => ChatSpeaker.ryza,
+        _ => ChatSpeaker.character,
       };
+      activeCharacterId = activeSpeaker == ChatSpeaker.character
+          ? prefix.group(2)?.toLowerCase()
+          : null;
       final content = line.substring(prefix.end).trim();
       if (content.isNotEmpty) {
-        segments.add(ChatSegment(speaker: activeSpeaker, text: content));
+        segments.add(
+          ChatSegment(
+            speaker: activeSpeaker,
+            text: content,
+            characterId: activeCharacterId,
+          ),
+        );
       }
       continue;
     }
@@ -147,7 +176,15 @@ List<ChatSegment> parseAssistantSegments(String response) {
     final speaker = _standaloneAction.hasMatch(line)
         ? ChatSpeaker.narrator
         : (activeSpeaker ?? ChatSpeaker.ryza);
-    segments.add(ChatSegment(speaker: speaker, text: line));
+    segments.add(
+      ChatSegment(
+        speaker: speaker,
+        text: line,
+        characterId: speaker == ChatSpeaker.character
+            ? activeCharacterId
+            : null,
+      ),
+    );
   }
 
   return segments;
@@ -164,9 +201,18 @@ List<List<ChatSegment>> groupAssistantSegmentsForDisplay(String response) {
   }
   final runs = <List<ChatSegment>>[];
   for (final segment in segments) {
-    final narrator = segment.speaker == ChatSpeaker.narrator;
-    if (runs.isEmpty ||
-        (runs.last.first.speaker == ChatSpeaker.narrator) != narrator) {
+    final previous = runs.isEmpty ? null : runs.last.first;
+    final continuesDialogueTranslation =
+        segment.speaker == ChatSpeaker.translation &&
+        previous != null &&
+        (previous.speaker == ChatSpeaker.ryza ||
+            previous.speaker == ChatSpeaker.character ||
+            previous.speaker == ChatSpeaker.translation);
+    final sameSpeaker =
+        previous != null &&
+        previous.speaker == segment.speaker &&
+        previous.characterId == segment.characterId;
+    if (runs.isEmpty || (!sameSpeaker && !continuesDialogueTranslation)) {
       runs.add(<ChatSegment>[]);
     }
     runs.last.add(segment);
@@ -493,6 +539,7 @@ String displayTextForAssistantResponse(String response) {
         final label = switch (segment.speaker) {
           ChatSpeaker.narrator => '旁白',
           ChatSpeaker.ryza => '莱莎',
+          ChatSpeaker.character => '角色[${segment.characterId ?? 'unknown'}]',
           ChatSpeaker.translation => '译文',
         };
         return '$label：$text';

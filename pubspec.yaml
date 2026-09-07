@@ -1,5 +1,5 @@
 name: ryza_chat_mvp
-description: "A local prototype for an animated character chat experience."
+description: "AgentAtelierR is a local-first animated AI character companion."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 0.5.0+14
+version: 0.7.0+15
 
 environment:
   sdk: ^3.13.2
@@ -34,8 +34,8 @@ dependencies:
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
-  # Public builds use the official runtime. Proprietary skeletons are not bundled.
-  spine_flutter: 4.2.36
+  spine_flutter:
+    path: packages/spine_flutter
   audioplayers: ^6.8.1
   shared_preferences: ^2.5.5
   http: ^1.6.0
@@ -45,6 +45,7 @@ dependencies:
   path_provider: ^2.1.6
   alarm: ^5.12.0
   permission_handler: ^13.0.1
+  image_picker: ^1.2.1
 
 dev_dependencies:
   flutter_test:
@@ -69,21 +70,28 @@ flutter:
   uses-material-design: true
 
   assets:
+    - assets/branding/
+    - assets/data/
     - assets/character/ryza/
     - assets/character/ryza/crf_skn_002_0001_01/
     - assets/character/ryza/crf_skn_002_0001_99/
+    - assets/spine/objects/obj_001/
     - assets/images/
     - assets/images/chara_icons/
     - assets/images/skins/
     - assets/audio/
     - assets/audio/alarm/
+    - assets/audio/alarm/voices/
     - assets/audio/soundscape/
     - assets/audio/ambient/
     - assets/audio/bgm/
     - assets/audio/se/
     - assets/audio/tap_voice/jp/normal/
+    - assets/audio/tap_voice/jp/asmr/
     - assets/audio/tap_voice/zh-tw/normal/
+    - assets/audio/tap_voice/zh-tw/asmr/
     - assets/audio/tap_voice/en/normal/
+    - assets/audio/tap_voice/en/asmr/
     - assets/scenes/stage_00_000_00_mor/
     - assets/scenes/stage_00_000_00_mor/spine/
     - assets/scenes/stage_00_000_00_aft/

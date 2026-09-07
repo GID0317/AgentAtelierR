@@ -1,5 +1,5 @@
 // enhanced_animation_system.dart
-// Ryza Chat 增强动画系统
+// AgentAtelierR 增强动画系统
 // 直接集成到项目中以提升动画生动性和流畅度
 
 import 'dart:async';

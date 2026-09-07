@@ -134,6 +134,24 @@ assets/audio/tap_voice/en/normal/
 
 日语映射会查找 `jp_normal_motion_touch_A_001_01.m4a` 到 `A_007_03.m4a`：组号 `001..007`，每组尾号 `01..03`，共 21 个文件。中文和英文使用对应语言前缀；实际文件名以 `lib/src/tap_reaction.dart` 的集中映射为准。可以改用自制或已获授权的语音，并同步更新该映射。
 
+启用 ASMR 语音模式时，点击语音会改从对应语言的 `asmr/` 子目录读取：
+
+```text
+assets/audio/tap_voice/jp/asmr/
+assets/audio/tap_voice/zh-tw/asmr/
+assets/audio/tap_voice/en/asmr/
+```
+
+目录内文件仍使用与普通模式相同的动作映射命名。没有该模式资源时，应在自己的 `tap_reaction.dart` 映射中提供明确的普通模式回退，而不是复制受限资源。
+
+闹钟语音的接口目录为：
+
+```text
+assets/audio/alarm/voices/<locale>_<normal|whisper>_<type>_<period>_<clip>.m4a
+```
+
+`type` 可取 `goodMorning`、`playWithMe`、`task`、`wellDone`；`period` 可取 `morning`、`daytime`、`evening`、`night`。这些只是本地文件路由约定，必须替换为自制或已获授权的音频。
+
 TTS 生成内容也必须获得声音权利人的授权，不能未经同意模仿特定演员或角色声音。
 
 ## 4. 放入合法资源
@@ -155,7 +173,7 @@ OpenAI 兼容接口和 Fish Audio Key 通过应用设置页填写，由平台安
 
 用户称呼、自画像、关系定位、互动偏好和边界说明只保存在本地偏好设置与用户主动导出的备份中。它们会以数据 JSON 注入系统提示词，并被明确标记为不能覆盖角色、安全和输出格式规则。导出文件可能包含私人描述，用户应自行妥善保管，不要提交到 Git 或公开 Issue。
 
-### 5.1 版本 0.5.0 的代码能力
+### 5.1 版本 0.7.0 的代码能力
 
 本仓库当前代码包含以下接口，但角色表现效果仍取决于用户提供的合法且兼容的资源：
 

@@ -5,8 +5,10 @@ import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import 'app_controller.dart';
-import 'runtime_log.dart';
 import 'app_localization.dart';
+import 'alarm_audio.dart';
+import 'glass_ui.dart';
+import 'runtime_log.dart';
 
 class AlarmScreen extends StatefulWidget {
   const AlarmScreen({
@@ -84,11 +86,23 @@ class _AlarmScreenState extends State<AlarmScreen> {
     if (!dateTime.isAfter(now)) {
       dateTime = dateTime.add(const Duration(days: 1));
     }
+    if (!mounted) return;
+    final reminderType = await _selectReminderType(language);
+    if (reminderType == null) return;
+
+    final alarmId = DateTime.now().millisecondsSinceEpoch.remainder(1000000000);
+    final audioAsset = alarmVoiceAsset(
+      language: widget.controller.characterReplyLanguage,
+      type: reminderType,
+      asmr: widget.controller.asmrModeEnabled,
+      hour: selected.hour,
+      variantSeed: alarmId,
+    );
 
     final settings = AlarmSettings(
-      id: DateTime.now().millisecondsSinceEpoch.remainder(1000000000),
+      id: alarmId,
       dateTime: dateTime,
-      assetAudioPath: 'assets/audio/alarm/alarm_ring.m4a',
+      assetAudioPath: audioAsset,
       loopAudio: true,
       vibrate: true,
       androidFullScreenIntent: true,
@@ -98,12 +112,12 @@ class _AlarmScreenState extends State<AlarmScreen> {
       ),
       androidSnoozeDuration: const Duration(minutes: 5),
       notificationSettings: NotificationSettings(
-        title: language.text('莱莎来叫你了', 'Ryza is waking you up', 'ライザが起こしに来ました'),
-        body: language.text(
-          '约定的时间到了，快醒醒吧。',
-          'It is time. Wake up!',
-          '約束の時間です。起きてください！',
+        title: language.text(
+          '莱莎的${reminderType.label(language)}',
+          'Ryza: ${reminderType.label(language)}',
+          'ライザ・${reminderType.label(language)}',
         ),
+        body: reminderType.description(language),
         stopButton: language.text('停止', 'Stop', '停止'),
         androidSnoozeButton: language.text('稍后提醒', 'Snooze', 'スヌーズ'),
         androidStopAlarmOnDismiss: false,
@@ -113,7 +127,8 @@ class _AlarmScreenState extends State<AlarmScreen> {
     if (success) {
       RuntimeLog.instance.info(
         'Alarm',
-        '闹钟设置成功，时间=${dateTime.toIso8601String()}',
+        '闹钟设置成功，时间=${dateTime.toIso8601String()} '
+            '类型=${reminderType.name} 语音=$audioAsset',
       );
     } else {
       RuntimeLog.instance.warning('Alarm', 'Alarm.set 返回失败');
@@ -130,80 +145,167 @@ class _AlarmScreenState extends State<AlarmScreen> {
     await _refresh();
   }
 
+  Future<AlarmReminderType?> _selectReminderType(AppLanguage language) {
+    final whisper = widget.controller.asmrModeEnabled;
+    return showDialog<AlarmReminderType>(
+      context: context,
+      builder: (context) => SimpleDialog(
+        title: Text(language.text('选择提醒类型', 'Reminder type', 'リマインダー種類')),
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(24, 0, 24, 8),
+            child: Text(
+              whisper
+                  ? language.text(
+                      '当前 ASMR 模式：使用耳语闹钟',
+                      'ASMR mode: whisper alarm voice',
+                      'ASMR モード：ささやきボイス',
+                    )
+                  : language.text(
+                      '当前普通模式：使用普通闹钟',
+                      'Normal mode: regular alarm voice',
+                      '通常モード：通常ボイス',
+                    ),
+              style: TextStyle(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+                fontSize: 12,
+              ),
+            ),
+          ),
+          for (final type in AlarmReminderType.values)
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(context, type),
+              child: Row(
+                children: [
+                  Icon(_reminderIcon(type)),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(type.label(language)),
+                        const SizedBox(height: 2),
+                        Text(
+                          type.description(language),
+                          style: TextStyle(
+                            color: Theme.of(context)
+                                .colorScheme
+                                .onSurfaceVariant,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  IconData _reminderIcon(AlarmReminderType type) => switch (type) {
+    AlarmReminderType.goodMorning => Icons.wb_sunny_outlined,
+    AlarmReminderType.playWithMe => Icons.favorite_border_rounded,
+    AlarmReminderType.task => Icons.task_alt_rounded,
+    AlarmReminderType.wellDone => Icons.celebration_outlined,
+  };
+
   @override
   Widget build(BuildContext context) {
     final language = widget.controller.interfaceLanguage;
     return Scaffold(
+      backgroundColor: Colors.transparent,
       appBar: AppBar(
-        leading: IconButton(
-          onPressed: widget.onMenuPressed,
-          tooltip: language.text('菜单', 'Menu', 'メニュー'),
-          icon: const Icon(Icons.menu),
+        automaticallyImplyLeading: false,
+        title: Padding(
+          padding: const EdgeInsets.only(left: 58),
+          child: Text(language.text('语音闹钟', 'Voice alarms', 'ボイスアラーム')),
         ),
-        title: Text(language.text('语音闹钟', 'Voice alarms', 'ボイスアラーム')),
       ),
       floatingActionButton: FloatingActionButton(
         onPressed: _addAlarm,
         tooltip: language.text('添加闹钟', 'Add alarm', 'アラームを追加'),
         child: const Icon(Icons.add_alarm_outlined),
       ),
-      body: _alarms.isEmpty
-          ? Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    Icons.alarm_off_outlined,
-                    size: 48,
-                    color: Colors.black38,
-                  ),
-                  SizedBox(height: 12),
-                  Text(
-                    language.text('还没有闹钟', 'No alarms yet', 'アラームはありません'),
-                    style: const TextStyle(fontSize: 18),
-                  ),
-                  const SizedBox(height: 5),
-                  Text(
-                    language.text(
-                      '添加后可在锁屏状态响铃',
-                      'Alarms can ring while the screen is locked',
-                      'ロック画面でもアラームを鳴らせます',
+      body: GlassSurface(
+        liquidGlass: widget.controller.liquidGlassChatUi,
+        tone: Theme.of(context).brightness == Brightness.dark
+            ? GlassTone.dark
+            : GlassTone.light,
+        fallbackColor: Theme.of(context).brightness == Brightness.dark
+            ? const Color(0xD91C2222)
+            : const Color(0xB8EEF2F0),
+        borderRadius: BorderRadius.zero,
+        child: _alarms.isEmpty
+            ? Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      Icons.alarm_off_outlined,
+                      size: 48,
+                      color: Colors.black38,
                     ),
-                  ),
-                ],
-              ),
-            )
-          : ListView.separated(
-              padding: const EdgeInsets.fromLTRB(12, 8, 12, 96),
-              itemCount: _alarms.length,
-              separatorBuilder: (_, _) => const SizedBox(height: 8),
-              itemBuilder: (context, index) {
-                final alarm = _alarms[index];
-                final time = TimeOfDay.fromDateTime(alarm.dateTime)
-                    .format(context);
-                return Material(
-                  color: Theme.of(context).colorScheme.surfaceContainer,
-                  borderRadius: BorderRadius.circular(8),
-                  child: ListTile(
-                    contentPadding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
-                    leading: const Icon(Icons.alarm_on_outlined),
-                    title: Text(
-                      time,
-                      style: const TextStyle(
-                        fontSize: 24,
-                        fontWeight: FontWeight.w600,
+                    SizedBox(height: 12),
+                    Text(
+                      language.text('还没有闹钟', 'No alarms yet', 'アラームはありません'),
+                      style: const TextStyle(fontSize: 18),
+                    ),
+                    const SizedBox(height: 5),
+                    Text(
+                      language.text(
+                        '添加后可在锁屏状态响铃',
+                        'Alarms can ring while the screen is locked',
+                        'ロック画面でもアラームを鳴らせます',
                       ),
                     ),
-                    subtitle: Text(_dateLabel(alarm.dateTime, language)),
-                    trailing: IconButton(
-                      onPressed: () => _deleteAlarm(alarm),
-                      tooltip: language.text('删除闹钟', 'Delete alarm', 'アラームを削除'),
-                      icon: const Icon(Icons.delete_outline),
+                  ],
+                ),
+              )
+            : ListView.separated(
+                padding: const EdgeInsets.fromLTRB(12, 8, 12, 96),
+                itemCount: _alarms.length,
+                separatorBuilder: (_, _) => const SizedBox(height: 8),
+                itemBuilder: (context, index) {
+                  final alarm = _alarms[index];
+                  final audioAsset = alarm.assetAudioPath ?? '';
+                  final reminderType = alarmReminderTypeFromAsset(audioAsset);
+                  final time = TimeOfDay.fromDateTime(alarm.dateTime)
+                      .format(context);
+                  return Material(
+                    color: Theme.of(context).colorScheme.surfaceContainer,
+                    borderRadius: BorderRadius.circular(8),
+                    child: ListTile(
+                      contentPadding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+                      leading: Icon(_reminderIcon(reminderType)),
+                      title: Text(
+                        time,
+                        style: const TextStyle(
+                          fontSize: 24,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      subtitle: Text(
+                        '${reminderType.label(language)} · '
+                        '${alarmAssetUsesWhisper(audioAsset) ? language.text('耳语', 'Whisper', 'ささやき') : language.text('普通', 'Normal', '通常')}\n'
+                        '${_dateLabel(alarm.dateTime, language)}',
+                      ),
+                      trailing: IconButton(
+                        onPressed: () => _deleteAlarm(alarm),
+                        tooltip: language.text(
+                          '删除闹钟',
+                          'Delete alarm',
+                          'アラームを削除',
+                        ),
+                        icon: const Icon(Icons.delete_outline),
+                      ),
                     ),
-                  ),
-                );
-              },
-            ),
+                  );
+                },
+              ),
+      ),
     );
   }
 

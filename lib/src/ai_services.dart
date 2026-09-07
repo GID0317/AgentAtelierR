@@ -9,6 +9,7 @@ import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 
 import 'app_controller.dart';
+import 'device_agent_tools.dart';
 import 'runtime_log.dart';
 
 class SecretStore {
@@ -18,6 +19,9 @@ class SecretStore {
 
   Future<String> readOpenAiKey() async =>
       await _storage.read(key: 'openai_api_key') ?? '';
+
+  Future<String> readGeminiKey() async =>
+      await _storage.read(key: 'gemini_api_key') ?? '';
 
   Future<String> readFishAudioKey() async =>
       await _storage.read(key: 'fish_audio_api_key') ?? '';
@@ -30,6 +34,14 @@ class SecretStore {
 
   Future<void> writeOpenAiKey(String value) =>
       _writeOrDelete('openai_api_key', value);
+
+  Future<void> writeGeminiKey(String value) =>
+      _writeOrDelete('gemini_api_key', value);
+
+  Future<String> readLlmKey(LlmProvider provider) => switch (provider) {
+    LlmProvider.openAiCompatible => readOpenAiKey(),
+    LlmProvider.gemini => readGeminiKey(),
+  };
 
   Future<void> writeFishAudioKey(String value) =>
       _writeOrDelete('fish_audio_api_key', value);
@@ -65,11 +77,23 @@ class OpenAiCompatibleClient {
   OpenAiCompatibleClient({
     http.Client? client,
     WebSearchClient? webSearchClient,
+    this._agentToolExecutor,
   }) : _client = client ?? http.Client(),
        _webSearchClient = webSearchClient ?? WebSearchClient(client: client);
 
   final http.Client _client;
   final WebSearchClient _webSearchClient;
+  final AgentToolExecutor? _agentToolExecutor;
+
+  List<Map<String, dynamic>> get _agentTools => [
+    _webSearchTool,
+    if (_agentToolExecutor != null) ...[
+      _currentLocationTool,
+      _nearbyServicesTool,
+      _launchableAppsTool,
+      _localDateTimeTool,
+    ],
+  ];
 
   Stream<String> streamChat({
     required String baseUrl,
@@ -85,7 +109,7 @@ class OpenAiCompatibleClient {
       {
         'role': 'system',
         'content': agentEnabled
-            ? '$systemPrompt\n\n需要实时或不确定的网络信息时，调用 web_search。根据搜索结果回答，并在相关事实后保留来源 URL。'
+            ? '$systemPrompt\n\n你可以按需使用工具。需要实时或不确定的网络信息时调用 web_search，并在相关事实后保留来源 URL。只有用户的问题确实依赖当前位置、周边服务或设备应用选择时，才能调用相应设备工具；调用定位可能触发系统权限弹窗，用户拒绝后不得猜测位置或反复申请。应用列表仅用于推荐，不得声称已经打开、操作或检查了其他应用。优先并行调用互不依赖的工具，避免重复调用。'
             : systemPrompt,
       },
       for (final message in messages)
@@ -127,7 +151,7 @@ class OpenAiCompatibleClient {
     required String? reasoningEffort,
     required double? outputMultiplier,
   }) async* {
-    const maxToolRounds = 2;
+    const maxToolRounds = 4;
     for (var round = 0; round < maxToolRounds; round += 1) {
       final assistant = await _completeMessage(
         baseUrl: baseUrl,
@@ -138,7 +162,7 @@ class OpenAiCompatibleClient {
           conversation: conversation,
           reasoningEffort: reasoningEffort,
           outputMultiplier: outputMultiplier,
-          tools: const [_webSearchTool],
+          tools: _agentTools,
         ),
       );
       final toolCalls = (assistant['tool_calls'] as List<dynamic>? ?? const [])
@@ -160,9 +184,9 @@ class OpenAiCompatibleClient {
         conversation.add({
           'role': 'tool',
           'tool_call_id': toolCall['id'] as String? ?? 'web_search',
-          'content': index < 2
+          'content': index < 3
               ? await _executeToolCall(toolCall)
-              : '工具调用失败：单轮最多执行 2 个工具调用。',
+              : '工具调用失败：单轮最多执行 3 个工具调用。',
         });
       }
     }
@@ -176,7 +200,7 @@ class OpenAiCompatibleClient {
         conversation: conversation,
         reasoningEffort: reasoningEffort,
         outputMultiplier: outputMultiplier,
-        tools: const [_webSearchTool],
+        tools: _agentTools,
         toolChoice: 'none',
       ),
     );
@@ -320,24 +344,74 @@ class OpenAiCompatibleClient {
 
   Future<String> _executeToolCall(Map<String, dynamic> toolCall) async {
     final function = toolCall['function'];
-    if (function is! Map<String, dynamic> || function['name'] != 'web_search') {
+    if (function is! Map<String, dynamic>) {
       return '工具调用失败：不支持该工具。';
     }
+    final name = function['name'] as String? ?? '';
     try {
       final rawArguments = function['arguments'] as String? ?? '{}';
       final arguments = jsonDecode(rawArguments) as Map<String, dynamic>;
-      final query = (arguments['query'] as String? ?? '').trim();
-      if (query.isEmpty) return '搜索失败：query 不能为空。';
-      final results = await _webSearchClient.search(query);
-      return [
-        '搜索词：$query',
-        for (var index = 0; index < results.length; index += 1)
-          '${index + 1}. ${results[index].title}\n${results[index].snippet}\n${results[index].url}',
-      ].join('\n\n');
+      final started = DateTime.now();
+      final output = switch (name) {
+        'web_search' => await _executeWebSearch(arguments),
+        'search_nearby_services' => await _executeNearbySearch(arguments),
+        'get_current_location' ||
+        'list_launchable_apps' ||
+        'get_local_datetime' =>
+          _agentToolExecutor == null
+              ? '工具调用失败：当前设备未启用该工具。'
+              : await _agentToolExecutor(name, arguments),
+        _ => '工具调用失败：不支持工具 $name。',
+      };
+      RuntimeLog.instance.info(
+        'Agent',
+        '工具调用完成 name=$name, durationMs=${DateTime.now().difference(started).inMilliseconds}, resultChars=${output.length}',
+      );
+      return output;
     } on Object catch (error) {
-      return '搜索失败：$error';
+      return '工具调用失败：$error';
     }
   }
+
+  Future<String> _executeWebSearch(Map<String, dynamic> arguments) async {
+    final query = (arguments['query'] as String? ?? '').trim();
+    if (query.isEmpty) return '搜索失败：query 不能为空。';
+    final results = await _webSearchClient.search(query);
+    return _formatSearchResults(query, results);
+  }
+
+  Future<String> _executeNearbySearch(Map<String, dynamic> arguments) async {
+    if (_agentToolExecutor == null) return '周边搜索失败：当前设备不支持定位工具。';
+    final query = (arguments['query'] as String? ?? '').trim();
+    if (query.isEmpty) return '周边搜索失败：query 不能为空。';
+    final locationText = await _agentToolExecutor(
+      'get_current_location',
+      const {},
+    );
+    Map<String, dynamic> location;
+    try {
+      location = jsonDecode(locationText) as Map<String, dynamic>;
+    } on Object {
+      return '周边搜索无法继续：$locationText';
+    }
+    final latitude = location['latitude'];
+    final longitude = location['longitude'];
+    if (latitude is! num || longitude is! num) {
+      return '周边搜索无法继续：没有取得有效坐标。';
+    }
+    final searchQuery = '$query 附近 $latitude,$longitude';
+    final results = await _webSearchClient.search(searchQuery);
+    return [
+      '当前位置坐标：$latitude,$longitude（仅用于本次查询）',
+      _formatSearchResults(searchQuery, results),
+    ].join('\n\n');
+  }
+
+  String _formatSearchResults(String query, List<WebSearchResult> results) => [
+    '搜索词：$query',
+    for (var index = 0; index < results.length; index += 1)
+      '${index + 1}. ${results[index].title}\n${results[index].snippet}\n${results[index].url}',
+  ].join('\n\n');
 
   String _messageText(Map<String, dynamic> message) {
     final content = message['content'];
@@ -362,6 +436,64 @@ class OpenAiCompatibleClient {
           'query': {'type': 'string', 'description': '简洁、具体的搜索关键词'},
         },
         'required': ['query'],
+        'additionalProperties': false,
+      },
+    },
+  };
+
+  static const Map<String, dynamic> _currentLocationTool = {
+    'type': 'function',
+    'function': {
+      'name': 'get_current_location',
+      'description': '取得设备当前经纬度。仅在天气、路线、周边生活服务等明确依赖用户位置的问题中使用；可能按需请求定位权限。',
+      'parameters': {
+        'type': 'object',
+        'properties': <String, dynamic>{},
+        'additionalProperties': false,
+      },
+    },
+  };
+
+  static const Map<String, dynamic> _nearbyServicesTool = {
+    'type': 'function',
+    'function': {
+      'name': 'search_nearby_services',
+      'description': '取得当前位置并搜索附近的商店、餐饮、医院、交通或其他生活服务。仅在用户明确询问周边信息时使用。',
+      'parameters': {
+        'type': 'object',
+        'properties': {
+          'query': {'type': 'string', 'description': '要查找的具体服务，例如附近仍营业的药店'},
+        },
+        'required': ['query'],
+        'additionalProperties': false,
+      },
+    },
+  };
+
+  static const Map<String, dynamic> _launchableAppsTool = {
+    'type': 'function',
+    'function': {
+      'name': 'list_launchable_apps',
+      'description': '列出设备上具有桌面启动入口的应用，供应用选择和使用建议参考。不读取应用内容、使用记录，也不会启动应用。',
+      'parameters': {
+        'type': 'object',
+        'properties': {
+          'query': {'type': 'string', 'description': '可选的应用名称或包名筛选词'},
+          'limit': {'type': 'integer', 'minimum': 1, 'maximum': 80},
+        },
+        'additionalProperties': false,
+      },
+    },
+  };
+
+  static const Map<String, dynamic> _localDateTimeTool = {
+    'type': 'function',
+    'function': {
+      'name': 'get_local_datetime',
+      'description': '取得设备当前本地日期、时间和时区。用于时间敏感的问题，无需系统权限。',
+      'parameters': {
+        'type': 'object',
+        'properties': <String, dynamic>{},
         'additionalProperties': false,
       },
     },
@@ -565,6 +697,7 @@ class FishAudioClient {
     String latency = 'normal',
     double speed = 1.0,
     double temperature = 0.7,
+    String baseUrl = endpoint,
   }) async {
     final bytes = await synthesizeBytes(
       apiKey: apiKey,
@@ -575,18 +708,9 @@ class FishAudioClient {
       latency: latency,
       speed: speed,
       temperature: temperature,
+      baseUrl: baseUrl,
     );
-    final extension = switch (format) {
-      'wav' => 'wav',
-      'opus' => 'opus',
-      _ => 'mp3',
-    };
-    final directory = await getTemporaryDirectory();
-    final file = File(
-      '${directory.path}${Platform.pathSeparator}fish_tts_${DateTime.now().millisecondsSinceEpoch}.$extension',
-    );
-    await file.writeAsBytes(bytes, flush: true);
-    return file.path;
+    return _writeTemporaryAudio(bytes, 'fish_tts', format);
   }
 
   Future<Uint8List> synthesizeBytes({
@@ -598,9 +722,10 @@ class FishAudioClient {
     String latency = 'normal',
     double speed = 1.0,
     double temperature = 0.7,
+    String baseUrl = endpoint,
   }) async {
     final started = DateTime.now();
-    final uri = Uri.parse(endpoint);
+    final uri = Uri.parse(baseUrl.trim().isEmpty ? endpoint : baseUrl.trim());
     final requestBody = {
       'text': text,
       'reference_id': referenceId,
@@ -665,6 +790,112 @@ class DashScopeTtsClient {
   static const endpoint =
       'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation';
   final http.Client _client;
+
+  Future<String> createQwenVoice({
+    required String apiKey,
+    required Uint8List audioBytes,
+    required String mimeType,
+    required String preferredName,
+    required String targetModel,
+    String language = 'Chinese',
+    String audioText = '',
+    String baseUrl = endpoint,
+  }) async {
+    if (apiKey.trim().isEmpty) {
+      throw const AiServiceException('请填写 DashScope API Key');
+    }
+    if (targetModel.trim().isEmpty) {
+      throw const AiServiceException('请填写目标 TTS 模型');
+    }
+    if (!RegExp(r'^[A-Za-z0-9_]{1,16}$').hasMatch(preferredName.trim())) {
+      throw const AiServiceException('音色名称只能包含数字、英文字母和下划线，最多 16 个字符');
+    }
+    if (!const {'audio/wav', 'audio/mpeg', 'audio/mp4'}.contains(mimeType)) {
+      throw const AiServiceException('参考音频仅支持 WAV、MP3 或 M4A');
+    }
+    if (audioBytes.isEmpty) throw const AiServiceException('参考音频为空');
+    if (audioBytes.length >= 10 * 1024 * 1024) {
+      throw const AiServiceException('参考音频必须小于 10MB');
+    }
+    final dataUrl = 'data:$mimeType;base64,${base64Encode(audioBytes)}';
+    final uri = Uri.parse(_customizationEndpoint(baseUrl));
+    final requestBody = {
+      'model': 'qwen-voice-enrollment',
+      'input': {
+        'action': 'create',
+        'target_model': targetModel,
+        'audio': {'data': dataUrl},
+        'preferred_name': preferredName,
+        if (language.trim().isNotEmpty) 'language_hints': [language],
+        if (audioText.trim().isNotEmpty) 'text': audioText.trim(),
+      },
+    };
+    final response = await _client.post(
+      uri,
+      headers: {
+        'Authorization': 'Bearer $apiKey',
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode(requestBody),
+    );
+    RuntimeLog.instance.communication(
+      source: 'TTS',
+      direction: 'request',
+      method: 'POST',
+      url: uri.toString(),
+      payload: {
+        'model': 'qwen-voice-enrollment',
+        'input': {
+          'action': 'create',
+          'target_model': targetModel,
+          'preferred_name': preferredName,
+          'audio_bytes': audioBytes.length,
+        },
+      },
+    );
+    RuntimeLog.instance.communication(
+      source: 'TTS',
+      direction: 'response',
+      method: 'POST',
+      url: uri.toString(),
+      statusCode: response.statusCode,
+      payload: response.body,
+    );
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw AiServiceException(
+        '百炼声音复刻失败 (${response.statusCode})${_responseMessage(response.body)}',
+      );
+    }
+    final decoded = jsonDecode(response.body) as Map<String, dynamic>;
+    final output = decoded['output'] as Map<String, dynamic>?;
+    if (decoded['fallback_mode'] == true) {
+      final reason = decoded['fallback_reason'];
+      throw AiServiceException(
+        '百炼返回了降级结果${reason is String && reason.isNotEmpty ? '：$reason' : ''}',
+      );
+    }
+    final voice = output?['voice'] as String? ?? output?['voice_id'] as String?;
+    if (voice == null || voice.isEmpty) {
+      throw const AiServiceException('百炼声音复刻响应中没有 Voice ID');
+    }
+    return voice;
+  }
+
+  String _customizationEndpoint(String configured) {
+    final raw = configured.trim().isEmpty ? endpoint : configured.trim();
+    final uri = Uri.tryParse(raw);
+    if (uri == null || uri.host.isEmpty) return raw;
+    final host = uri.host.replaceFirst(
+      'dashscope.aliyuncs.com',
+      'dashscope.aliyuncs.com',
+    );
+    return Uri(
+      scheme: uri.scheme,
+      host: host,
+      port: uri.hasPort ? uri.port : null,
+      path: '/api/v1/services/audio/tts/customization',
+    ).toString();
+  }
 
   Future<String> synthesize({
     required String apiKey,
@@ -863,14 +1094,55 @@ String _responseMessage(String body) {
 Future<String> _writeTemporaryAudio(
   Uint8List bytes,
   String prefix,
-  String extension,
+  String requestedExtension,
 ) async {
+  final extension = detectAudioContainerExtension(bytes);
+  if (extension == null) {
+    final preview = utf8
+        .decode(bytes.take(160).toList(growable: false), allowMalformed: true)
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    throw AiServiceException(
+      'TTS 返回的内容不是可识别的音频文件'
+      '${preview.isEmpty ? '' : '：${preview.length > 120 ? preview.substring(0, 120) : preview}'}',
+    );
+  }
+  final normalizedRequested = requestedExtension.trim().toLowerCase();
+  if (normalizedRequested.isNotEmpty && normalizedRequested != extension) {
+    RuntimeLog.instance.info(
+      'TTS',
+      '响应音频格式与请求不同，requested=$normalizedRequested, detected=$extension, bytes=${bytes.length}',
+    );
+  }
   final directory = await getTemporaryDirectory();
   final file = File(
     '${directory.path}${Platform.pathSeparator}${prefix}_${DateTime.now().millisecondsSinceEpoch}.$extension',
   );
   await file.writeAsBytes(bytes, flush: true);
   return file.path;
+}
+
+String? detectAudioContainerExtension(Uint8List bytes) {
+  bool startsWith(List<int> signature, [int offset = 0]) {
+    if (bytes.length < offset + signature.length) return false;
+    for (var index = 0; index < signature.length; index++) {
+      if (bytes[offset + index] != signature[index]) return false;
+    }
+    return true;
+  }
+
+  if (startsWith(const [0x52, 0x49, 0x46, 0x46]) &&
+      startsWith(const [0x57, 0x41, 0x56, 0x45], 8)) {
+    return 'wav';
+  }
+  if (startsWith(const [0x49, 0x44, 0x33]) ||
+      (bytes.length >= 2 && bytes[0] == 0xff && (bytes[1] & 0xe0) == 0xe0)) {
+    return 'mp3';
+  }
+  if (startsWith(const [0x4f, 0x67, 0x67, 0x53])) return 'ogg';
+  if (startsWith(const [0x66, 0x4c, 0x61, 0x43])) return 'flac';
+  if (startsWith(const [0x66, 0x74, 0x79, 0x70], 4)) return 'm4a';
+  return null;
 }
 
 class AiServiceException implements Exception {

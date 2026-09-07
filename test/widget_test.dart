@@ -467,6 +467,95 @@ void main() {
     expect(output.join(), '已根据搜索结果回答。');
   });
 
+  test('agent exposes and executes on-demand device tools', () async {
+    var apiCalls = 0;
+    String? executedTool;
+    final client = MockClient((request) async {
+      apiCalls += 1;
+      final body = jsonDecode(request.body) as Map<String, dynamic>;
+      if (apiCalls == 1) {
+        final tools = (body['tools'] as List<dynamic>)
+            .whereType<Map<String, dynamic>>()
+            .map((tool) => (tool['function'] as Map<String, dynamic>)['name'])
+            .toList();
+        expect(
+          tools,
+          containsAll(<String>[
+            'web_search',
+            'get_current_location',
+            'search_nearby_services',
+            'list_launchable_apps',
+            'get_local_datetime',
+          ]),
+        );
+        return http.Response.bytes(
+          utf8.encode(
+            jsonEncode({
+              'choices': [
+                {
+                  'message': {
+                    'role': 'assistant',
+                    'content': '',
+                    'tool_calls': [
+                      {
+                        'id': 'call_apps',
+                        'type': 'function',
+                        'function': {
+                          'name': 'list_launchable_apps',
+                          'arguments': jsonEncode({'query': '地图'}),
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+            }),
+          ),
+          200,
+          headers: {'content-type': 'application/json; charset=utf-8'},
+        );
+      }
+      final messages = body['messages'] as List<dynamic>;
+      expect(
+        (messages.last as Map<String, dynamic>)['content'],
+        contains('地图'),
+      );
+      return http.Response.bytes(
+        utf8.encode(
+          jsonEncode({
+            'choices': [
+              {
+                'message': {'role': 'assistant', 'content': '推荐使用地图应用。'},
+              },
+            ],
+          }),
+        ),
+        200,
+        headers: {'content-type': 'application/json; charset=utf-8'},
+      );
+    });
+    final service = OpenAiCompatibleClient(
+      client: client,
+      agentToolExecutor: (name, arguments) async {
+        executedTool = name;
+        return '{"apps":[{"name":"地图","packageName":"example.maps"}]}';
+      },
+    );
+    final output = await service
+        .streamChat(
+          baseUrl: 'https://api.openai.com/v1',
+          apiKey: 'test-key',
+          model: 'gpt-5.4',
+          systemPrompt: 'test',
+          messages: const [ChatMessage(text: '我该用哪个地图应用？', isUser: true)],
+          agentEnabled: true,
+        )
+        .toList();
+
+    expect(executedTool, 'list_launchable_apps');
+    expect(output.join(), '推荐使用地图应用。');
+  });
+
   test(
     'assistant response separates narrator and Ryza for display and TTS',
     () {
@@ -748,6 +837,29 @@ void main() {
     expect(naturalDense, contains('[emphasis]'));
   });
 
+  test('ASMR delivery cues still obey the independent density control', () {
+    const sample = '[relaxed] [breathy] 靠近一点。[short pause] [inhale] 我有件事想告诉你。';
+    final disabled = applyFishEmotionIntensityPerSentence(
+      sample,
+      TtsEmotionIntensity.dramatic,
+      density: TtsCueDensity.off,
+    );
+    expect(disabled, contains('deeply relaxed'));
+    expect(disabled, isNot(contains('[breathy]')));
+    expect(disabled, isNot(contains('[short pause]')));
+    expect(disabled, isNot(contains('[inhale]')));
+
+    final dense = applyFishEmotionIntensityPerSentence(
+      sample,
+      TtsEmotionIntensity.natural,
+      density: TtsCueDensity.everySentence,
+    );
+    expect(dense, contains('[relaxed]'));
+    expect(dense, contains('[breathy]'));
+    expect(dense, contains('[short pause]'));
+    expect(dense, contains('[inhale]'));
+  });
+
   test('voice instructions reflect the selected emotion intensity', () {
     expect(ttsEmotionInstruction(TtsEmotionIntensity.off), isEmpty);
     expect(
@@ -784,6 +896,44 @@ void main() {
     );
 
     expect(bytes, [1, 2, 3]);
+  });
+
+  test('TTS audio container is detected from its bytes', () {
+    final wav = Uint8List.fromList(<int>[
+      0x52,
+      0x49,
+      0x46,
+      0x46,
+      0x24,
+      0x00,
+      0x00,
+      0x00,
+      0x57,
+      0x41,
+      0x56,
+      0x45,
+    ]);
+    final mp3 = Uint8List.fromList(<int>[0x49, 0x44, 0x33, 0x04]);
+    expect(detectAudioContainerExtension(wav), 'wav');
+    expect(detectAudioContainerExtension(mp3), 'mp3');
+  });
+
+  test('TTS rejects a successful non-audio response before playback', () async {
+    final client = MockClient((request) async {
+      return http.Response('{"error":"proxy failure"}', 200);
+    });
+    expect(
+      () =>
+          FishAudioClient(client: client)
+              .synthesize(apiKey: 'secret', referenceId: 'voice', text: 'test'),
+      throwsA(
+        isA<AiServiceException>().having(
+          (error) => error.message,
+          'message',
+          contains('不是可识别的音频文件'),
+        ),
+      ),
+    );
   });
 
   test('DashScope Qwen-TTS request follows official multimodal API', () async {
@@ -902,6 +1052,40 @@ void main() {
     ]);
   });
 
+  test('other characters stay in separate text-only dialogue runs', () {
+    const response =
+        '莱莎：[happy][face:happy][action:wave] 你也来啦！\n'
+        '角色[lent]：我只是刚好路过。\n'
+        '译文：I was just passing by.\n'
+        '旁白：兰托把视线移向森林。';
+    final segments = parseAssistantSegments(response);
+    final runs = groupAssistantSegmentsForDisplay(response);
+
+    expect(segments[1].speaker, ChatSpeaker.character);
+    expect(segments[1].characterId, 'lent');
+    expect(runs.map((run) => run.first.speaker), [
+      ChatSpeaker.ryza,
+      ChatSpeaker.character,
+      ChatSpeaker.narrator,
+    ]);
+    expect(runs[1].map((segment) => segment.speaker), [
+      ChatSpeaker.character,
+      ChatSpeaker.translation,
+    ]);
+    expect(
+      ttsTextForAssistantResponse(response, fallbackMood: CharacterMood.happy),
+      contains('你也来啦'),
+    );
+    expect(
+      ttsTextForAssistantResponse(response, fallbackMood: CharacterMood.happy),
+      isNot(contains('我只是刚好路过')),
+    );
+    expect(
+      ttsTextForAssistantResponse(response, fallbackMood: CharacterMood.happy),
+      isNot(contains('I was just passing by')),
+    );
+  });
+
   test('image attachments reserve thumbnail height in conversation panel', () {
     final fileAttachment = conversationPanelFractionForText(
       text: '请查看附件。',
@@ -929,14 +1113,99 @@ void main() {
       final controller = await AppController.load();
 
       expect(controller.fishAudioModel, 's2-pro');
-      expect(
-        controller.buildCharacterPrompt(),
-        contains('每个非空行只能以“旁白：”、“莱莎：”或“译文：”开头'),
-      );
+      expect(controller.buildCharacterPrompt(), contains('“角色[角色ID]：”'));
+      expect(controller.buildCharacterPrompt(), contains('模糊时间线'));
+      expect(controller.buildCharacterPrompt(), contains('每轮最多让 1 至 2 位'));
       expect(controller.buildCharacterPrompt(), contains('Fish Audio S2'));
       expect(controller.buildCharacterPrompt(), contains('[face:crying]'));
       expect(controller.buildCharacterPrompt(), contains('[action:comfort]'));
       expect(controller.buildCharacterPrompt(), contains('绝对不要输出原始动画名'));
+    },
+  );
+
+  test('character catalog localizes names and follows map placement', () async {
+    SharedPreferences.setMockInitialValues({});
+    final controller = await AppController.load();
+    final catalog = controller.characterCatalog;
+    final encounterIds = catalog
+        .encountersFor('stage_01_002_01')
+        .map((item) => item.profile.id);
+
+    expect(catalog.displayName('claudia', AppLanguage.chinese), '科洛蒂娅·巴兰茨');
+    expect(
+      catalog.displayName('claudia', AppLanguage.english),
+      'Klaudia Valentz',
+    );
+    expect(catalog.displayName('claudia', AppLanguage.japanese), 'クラウディア・バレンツ');
+    expect(
+      catalog.displayNameForPlacementId('npc_klaudia', AppLanguage.chinese),
+      '科洛蒂娅·巴兰茨',
+    );
+    expect(
+      catalog.displayNameForPlacementId('npc_klaudia', AppLanguage.english),
+      'Klaudia Valentz',
+    );
+    expect(
+      catalog.displayNameForPlacementId('npc_klaudia', AppLanguage.japanese),
+      'クラウディア・バレンツ',
+    );
+    expect(encounterIds, containsAll(<String>['ampel', 'lila']));
+  });
+
+  test(
+    'NPC interaction frequency persists and changes only global direction',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final controller = await AppController.load();
+
+      controller.setNpcInteractionFrequency(NpcInteractionFrequency.lively);
+      await Future<void>.delayed(Duration.zero);
+      final restored = await AppController.load();
+      final prompt = restored.buildCharacterPrompt();
+
+      expect(restored.npcInteractionFrequency, NpcInteractionFrequency.lively);
+      expect(prompt, contains('NPC 互动频率为热闹'));
+      expect(prompt, contains('不要篡改人物设定'));
+      expect(
+        (restored.exportData()['preferences']
+            as Map<String, dynamic>)['npcInteractionFrequency'],
+        'lively',
+      );
+    },
+  );
+
+  test('reply and translation languages apply to every character', () async {
+    SharedPreferences.setMockInitialValues({});
+    final controller = await AppController.load();
+    controller.configureLanguages(
+      interface: AppLanguage.chinese,
+      narrator: AppLanguage.chinese,
+      characterReply: AppLanguage.japanese,
+      translation: TranslationLanguage.english,
+    );
+    final prompt = controller.buildCharacterPrompt();
+
+    expect(prompt, contains('莱莎和其他角色所有说出口的台词都必须使用 Japanese'));
+    expect(prompt, contains('每条“莱莎：”或“角色[角色ID]：”台词后都紧跟一条“译文：”'));
+    expect(prompt, contains('不得遗漏其他角色的译文'));
+  });
+
+  test(
+    'suggested reply prompt drafts for the user without auto-sending',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final controller = await AppController.load();
+      controller.configureLanguages(
+        interface: AppLanguage.english,
+        narrator: AppLanguage.chinese,
+        characterReply: AppLanguage.japanese,
+        translation: TranslationLanguage.none,
+      );
+      final prompt = controller.buildUserReplySuggestionPrompt();
+
+      expect(prompt, contains('草稿使用 English'));
+      expect(prompt, contains('只输出可直接放入输入框的正文'));
+      expect(prompt, contains('不要替用户捏造知识、经历、情绪、承诺'));
     },
   );
 
@@ -980,6 +1249,7 @@ void main() {
       controller.setAsmrModeEnabled(true);
       expect(controller.asmrModeEnabled, isFalse);
       expect(controller.activeFishAudioReferenceId, 'normal-fish-voice');
+      expect(controller.buildCharacterPrompt(), contains('当前未开启 ASMR 模式'));
 
       controller.configureFishAudio(
         enabled: true,
@@ -990,6 +1260,15 @@ void main() {
       controller.setAsmrModeEnabled(true);
       expect(controller.asmrModeEnabled, isTrue);
       expect(controller.activeFishAudioReferenceId, 'asmr-fish-voice');
+      expect(controller.buildCharacterPrompt(), contains('当前已开启 ASMR 模式'));
+      expect(
+        controller.buildCharacterPrompt(),
+        contains('[very breathy voice]'),
+      );
+      expect(controller.buildCharacterPrompt(), contains('[near-whisper]'));
+      expect(controller.buildCharacterPrompt(), contains('[inhale]'));
+      expect(controller.buildCharacterPrompt(), contains('当前 TTS 感情程度'));
+      expect(controller.buildCharacterPrompt(), contains('当前句内情绪演出密度'));
 
       controller.configureTts(
         enabled: true,
@@ -1050,9 +1329,9 @@ void main() {
       expect(restored.narratorLanguage, AppLanguage.english);
       expect(restored.characterReplyLanguage, AppLanguage.japanese);
       expect(restored.translationLanguage, TranslationLanguage.chinese);
-      expect(prompt, contains('台词必须使用 Japanese'));
+      expect(prompt, contains('所有说出口的台词都必须使用 Japanese'));
       expect(prompt, contains('旁白正文必须使用 English'));
-      expect(prompt, contains('每条“莱莎：”台词后紧跟一条“译文：”'));
+      expect(prompt, contains('每条“莱莎：”或“角色[角色ID]：”台词后都紧跟一条“译文：”'));
       expect(prompt, contains('"narratorBodyLanguage":"English"'));
       expect(prompt, contains('"ryzaSpeechLanguage":"Japanese"'));
       expect(
@@ -1160,6 +1439,166 @@ void main() {
     expect(restored.memorySummary, isEmpty);
   });
 
+  test('reply suggestions allow three uses per rolling ten minutes', () async {
+    SharedPreferences.setMockInitialValues({});
+    final controller = await AppController.load();
+    final start = DateTime(2026, 9, 7, 12);
+
+    expect(controller.consumeSuggestionUse(now: start), isTrue);
+    expect(
+      controller.consumeSuggestionUse(
+        now: start.add(const Duration(minutes: 1)),
+      ),
+      isTrue,
+    );
+    expect(
+      controller.consumeSuggestionUse(
+        now: start.add(const Duration(minutes: 2)),
+      ),
+      isTrue,
+    );
+    expect(
+      controller.consumeSuggestionUse(
+        now: start.add(const Duration(minutes: 9, seconds: 59)),
+      ),
+      isFalse,
+    );
+    expect(
+      controller.consumeSuggestionUse(
+        now: start.add(const Duration(minutes: 10)),
+      ),
+      isTrue,
+    );
+    expect(
+      controller.suggestionUsesRemaining(
+        now: start.add(const Duration(minutes: 10)),
+      ),
+      0,
+    );
+  });
+
+  test(
+    'reply suggestion quota persists and exposes refresh progress',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final controller = await AppController.load();
+      final start = DateTime.now();
+      expect(controller.consumeSuggestionUse(now: start), isTrue);
+      await Future<void>.delayed(Duration.zero);
+
+      final restored = await AppController.load();
+      expect(restored.suggestionUsesRemaining(now: start), 2);
+      expect(restored.suggestionRefreshProgress(now: start), 0);
+      expect(
+        restored.suggestionRefreshProgress(
+          now: start.add(const Duration(minutes: 5)),
+        ),
+        closeTo(0.5, 0.001),
+      );
+    },
+  );
+
+  test('structured memory keeps dated critical events and trims trivia', () {
+    final previous = jsonEncode({
+      'entries': [
+        {
+          'date': '2026-09-06',
+          'category': 'promise',
+          'importance': 5,
+          'summary': '用户答应第二天一起检查炼金釜。',
+          'status': 'active',
+          'keywords': ['炼金釜', '约定'],
+        },
+      ],
+    });
+    final candidate = jsonEncode({
+      'entries': List.generate(
+        45,
+        (index) => {
+          'date': '2026-09-07',
+          'category': 'other',
+          'importance': 1,
+          'summary': '普通闲聊 $index',
+          'status': 'active',
+          'keywords': ['闲聊$index'],
+        },
+      ),
+    });
+
+    final normalized = AppController.normalizeLongTermMemoryCandidate(
+      candidate,
+      previousMemory: previous,
+      now: DateTime(2026, 9, 7, 14),
+    );
+    final decoded = jsonDecode(normalized!) as Map<String, dynamic>;
+    final entries = decoded['entries'] as List<dynamic>;
+
+    expect(entries.length, 40);
+    expect(normalized, contains('2026-09-06'));
+    expect(normalized, contains('用户答应第二天一起检查炼金釜。'));
+  });
+
+  test(
+    'memory prompt recalls relevant dated entries and accepts legacy text',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final controller = await AppController.load();
+      controller.updateMemorySummary(
+        jsonEncode({
+          'entries': [
+            {
+              'date': '2026-09-06',
+              'category': 'preference',
+              'importance': 3,
+              'summary': '用户喜欢采集矿石。',
+              'status': 'active',
+              'keywords': ['矿石', '采集'],
+            },
+            {
+              'date': '2026-09-01',
+              'category': 'preference',
+              'importance': 2,
+              'summary': '用户喜欢苹果。',
+              'status': 'active',
+              'keywords': ['苹果'],
+            },
+          ],
+        }),
+      );
+      controller.addUserMessage('还记得我们昨天采集的矿石吗？');
+
+      final prompt = controller.buildCharacterPrompt();
+      expect(prompt, contains('2026-09-06'));
+      expect(prompt, contains('用户喜欢采集矿石。'));
+      expect(prompt, contains('先判断当前话题是否确实需要回忆'));
+
+      controller.updateMemorySummary('用户喜欢一起采集素材。');
+      expect(
+        controller.memoryPromptForCurrentConversation(),
+        contains('旧版未结构化记忆'),
+      );
+    },
+  );
+
+  test(
+    'critical relationship events request immediate memory consolidation',
+    () {
+      expect(
+        AppController.shouldRefreshMemoryImmediately('我答应明天一定会回来。'),
+        isTrue,
+      );
+      expect(
+        AppController.shouldRefreshMemoryImmediately('其实我喜欢你很久了。'),
+        isTrue,
+      );
+      expect(
+        AppController.shouldRefreshMemoryImmediately('刚才的话深深伤害了我。'),
+        isTrue,
+      );
+      expect(AppController.shouldRefreshMemoryImmediately('今天天气还不错。'), isFalse);
+    },
+  );
+
   test('undo removes the latest user turn and its assistant reply', () async {
     SharedPreferences.setMockInitialValues({});
     final controller = await AppController.load();
@@ -1249,6 +1688,91 @@ void main() {
     expect(encoded, isNot(contains('test-key')));
   });
 
+  test('Gemini uses its OpenAI-compatible chat endpoint', () async {
+    SharedPreferences.setMockInitialValues({});
+    await RuntimeLog.instance.initialize();
+    final client = MockClient((request) async {
+      expect(
+        request.url.toString(),
+        'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
+      );
+      final body = jsonDecode(request.body) as Map<String, dynamic>;
+      expect(body['model'], 'gemini-3.8-flash');
+      expect(body.containsKey('reasoning_effort'), isFalse);
+      expect(body.containsKey('max_completion_tokens'), isFalse);
+      return http.Response.bytes(
+        utf8.encode(
+          'data: {"choices":[{"delta":{"content":"Gemini 正常"}}]}\n\n'
+          'data: [DONE]\n\n',
+        ),
+        200,
+        headers: {'content-type': 'text/event-stream'},
+      );
+    });
+    final output = await OpenAiCompatibleClient(client: client)
+        .streamChat(
+          baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
+          apiKey: 'test-key',
+          model: 'gemini-3.8-flash',
+          systemPrompt: 'test',
+          messages: const [ChatMessage(text: 'hello', isUser: true)],
+        )
+        .toList();
+
+    expect(output.join(), 'Gemini 正常');
+    await Future<void>.delayed(Duration.zero);
+  });
+
+  test('Gemini provider settings persist and disable GPT controls', () async {
+    SharedPreferences.setMockInitialValues({});
+    final controller = await AppController.load();
+    controller.configureGemini(
+      enabled: true,
+      baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
+      model: 'gemini-3.8-flash',
+    );
+    await Future<void>.delayed(Duration.zero);
+
+    final restored = await AppController.load();
+    expect(restored.llmProvider, LlmProvider.gemini);
+    expect(restored.activeLlmModel, 'gemini-3.8-flash');
+    expect(restored.supportsOpenAiAdvancedControls, isFalse);
+    final exported = restored.exportData();
+    expect(exported['format'], 'agent-atelier-r-local-backup');
+    expect(
+      (exported['preferences'] as Map<String, dynamic>)['llmProvider'],
+      'gemini',
+    );
+  });
+
+  test('AgentAtelierR imports both new and legacy backup formats', () async {
+    SharedPreferences.setMockInitialValues({});
+    final controller = await AppController.load();
+    final newBackup = controller.exportData();
+    expect(() => controller.importData(newBackup), returnsNormally);
+
+    final legacyBackup = Map<String, dynamic>.from(newBackup)
+      ..['format'] = 'ryza-chat-local-backup';
+    expect(() => controller.importData(legacyBackup), returnsNormally);
+  });
+
+  test('Qwen voice cloning validates names before sending', () async {
+    final client = MockClient((request) async {
+      fail('Invalid input must not reach the network');
+    });
+
+    expect(
+      () => DashScopeTtsClient(client: client).createQwenVoice(
+        apiKey: 'test-key',
+        audioBytes: Uint8List.fromList([1, 2, 3]),
+        mimeType: 'audio/wav',
+        preferredName: '不合法音色名',
+        targetModel: 'qwen3-tts-flash',
+      ),
+      throwsA(isA<AiServiceException>()),
+    );
+  });
+
   test('advanced OpenAI and agent preferences are persisted', () async {
     SharedPreferences.setMockInitialValues({});
     final controller = await AppController.load();
@@ -1317,6 +1841,14 @@ void main() {
       leftArm.localizedVoiceAsset(AppLanguage.japanese, 5),
       'audio/tap_voice/jp/normal/jp_normal_motion_touch_A_001_03.m4a',
     );
+    expect(
+      leftArm.localizedVoiceAsset(AppLanguage.chinese, 2, asmr: true),
+      'audio/tap_voice/zh-tw/asmr/zh-tw_asmr_motion_touch_A_001_02.m4a',
+    );
+    expect(
+      leftArm.voiceAsset(1, asmr: true),
+      'audio/tap_voice/jp/asmr/jp_asmr_motion_touch_A_001_01.m4a',
+    );
   });
 
   test('polygon hit testing distinguishes inside and outside points', () {
@@ -1360,7 +1892,27 @@ void main() {
     expect(seated.idleAnimations, contains('motion_A_034_idle'));
     expect(standing.idleAnimations, hasLength(7));
     expect(characterOneShotAnimations, hasLength(12));
+    expect(seated.promptDescription, contains('棕色合身皮革马甲'));
+    expect(
+      characterAppearanceById('summer_yellow_01').promptDescription,
+      contains('黄白配色'),
+    );
   });
+
+  test(
+    'selected outfit description is injected into the character prompt',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final controller = await AppController.load();
+      controller.setCharacterAppearance('relaxed_shirt_01');
+
+      final prompt = controller.buildCharacterPrompt();
+
+      expect(prompt, contains('当前服装与姿态：休闲 T 恤'));
+      expect(prompt, contains('宽松的白色短袖长款 T 恤'));
+      expect(prompt, contains('不要每轮主动描述衣服'));
+    },
+  );
 
   test('expression presets use the original seated and standing face sets', () {
     final seated = characterExpressionPreset(
@@ -1425,46 +1977,25 @@ void main() {
     );
   });
 
-  test('gesture parser exposes composited groups and emotion weights', () {
-    final groups = parseCharacterMotionGroups(
-      jsonEncode({
-        'emotionalGesture': {
-          'MotionGroups': [
-            {
-              'GroupId': 'group-a',
-              'Label': 'composited test group',
-              'OccupancyLetters': 'FG',
-              'AnimName_1': 'motion_add_F_001_active',
-              'AnimName_2': 'motion_add_G_001_active',
-              'ApplicablePoseIds': 'pose-a',
-            },
-          ],
-          'EmotionProfilesV4': {
-            'happy': {
-              'intensityProfiles': {
-                'normal': {
-                  'armGroupWeights': {'group-a': 1.0},
-                },
-              },
-            },
-            'tease': {
-              'intensityProfiles': {
-                'normal': {
-                  'armGroupWeightsByPoseType': {
-                    '': {'group-a': 0.5},
-                  },
-                },
-              },
-            },
-          },
-        },
-      }),
+  test('original gesture files expose all composited motion groups', () async {
+    final seated = await loadCharacterMotionGroups(
+      characterAppearanceById('seated_01'),
+    );
+    final standing = await loadCharacterMotionGroups(
+      characterAppearanceById('standing_99'),
     );
 
-    expect(groups, hasLength(1));
-    expect(groups.single.animation2, isNotNull);
-    expect(groups.single.weightFor(CharacterExpression.happy), 1.0);
-    expect(groups.single.weightFor(CharacterExpression.tease), 0.5);
+    expect(seated, hasLength(140));
+    expect(standing, hasLength(53));
+    expect(seated.any((group) => group.animation2 != null), isTrue);
+    expect(
+      seated.any((group) => group.weightFor(CharacterExpression.happy) > 0),
+      isTrue,
+    );
+    expect(
+      seated.any((group) => group.weightFor(CharacterExpression.tease) > 0),
+      isTrue,
+    );
   });
 
   test('ambient motion prefers groups weighted for the current emotion', () {

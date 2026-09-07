@@ -1,5 +1,115 @@
 package com.example.ryza_chat_mvp
 
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
+import androidx.core.app.ActivityCompat
 import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.MethodChannel
 
-class MainActivity : FlutterActivity()
+class MainActivity : FlutterActivity() {
+    private val channelName = "ryza_chat/device_tools"
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+        super.configureFlutterEngine(flutterEngine)
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "getCurrentLocation" -> getCurrentLocation(result)
+                    "listLaunchableApps" -> result.success(listLaunchableApps())
+                    else -> result.notImplemented()
+                }
+            }
+    }
+
+    private fun listLaunchableApps(): List<Map<String, String>> {
+        val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        return packageManager.queryIntentActivities(intent, PackageManager.MATCH_ALL)
+            .map { info ->
+                mapOf(
+                    "name" to info.loadLabel(packageManager).toString(),
+                    "packageName" to info.activityInfo.packageName,
+                )
+            }
+            .distinctBy { it["packageName"] }
+            .sortedBy { it["name"]?.lowercase() }
+    }
+
+    private fun getCurrentLocation(result: MethodChannel.Result) {
+        val coarseGranted = ActivityCompat.checkSelfPermission(
+            this,
+            Manifest.permission.ACCESS_COARSE_LOCATION,
+        ) == PackageManager.PERMISSION_GRANTED
+        val fineGranted = ActivityCompat.checkSelfPermission(
+            this,
+            Manifest.permission.ACCESS_FINE_LOCATION,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!coarseGranted && !fineGranted) {
+            result.error("permission_denied", "Location permission is not granted", null)
+            return
+        }
+
+        val manager = getSystemService(LOCATION_SERVICE) as LocationManager
+        val providers = manager.getProviders(true)
+        val cached = providers.mapNotNull { provider ->
+            runCatching { manager.getLastKnownLocation(provider) }.getOrNull()
+        }.maxByOrNull { it.time }
+        if (cached != null && System.currentTimeMillis() - cached.time < 10 * 60 * 1000) {
+            result.success(locationPayload(cached))
+            return
+        }
+
+        val provider = providers.firstOrNull { it == LocationManager.GPS_PROVIDER }
+            ?: providers.firstOrNull { it == LocationManager.NETWORK_PROVIDER }
+            ?: providers.firstOrNull()
+        if (provider == null) {
+            result.error("location_disabled", "No enabled location provider", null)
+            return
+        }
+
+        var completed = false
+        lateinit var listener: LocationListener
+        fun finish(location: Location?, message: String? = null) {
+            if (completed) return
+            completed = true
+            mainHandler.removeCallbacksAndMessages(listener)
+            runCatching { manager.removeUpdates(listener) }
+            if (location != null) result.success(locationPayload(location))
+            else result.error("location_unavailable", message ?: "Location unavailable", null)
+        }
+        listener = object : LocationListener {
+            override fun onLocationChanged(location: Location) = finish(location)
+            override fun onProviderEnabled(provider: String) {}
+            override fun onProviderDisabled(provider: String) {}
+            @Deprecated("Deprecated in Android")
+            override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
+        }
+        try {
+            manager.requestSingleUpdate(provider, listener, Looper.getMainLooper())
+            mainHandler.postAtTime(
+                { finish(cached, "Timed out while obtaining location") },
+                listener,
+                SystemClock.uptimeMillis() + 12_000,
+            )
+        } catch (error: Exception) {
+            finish(cached, error.message)
+        }
+    }
+
+    private fun locationPayload(location: Location): Map<String, Any> = mapOf(
+        "latitude" to location.latitude,
+        "longitude" to location.longitude,
+        "accuracyMeters" to location.accuracy.toDouble(),
+        "provider" to (location.provider ?: "unknown"),
+        "capturedAt" to location.time,
+    )
+}
