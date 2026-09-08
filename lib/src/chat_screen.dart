@@ -149,7 +149,6 @@ class _ChatScreenState extends State<ChatScreen> {
   late CharacterAppearance _appearance;
   Timer? _idleTimer;
   Timer? _tapReactionTimer;
-  Timer? _speechFallbackTimer;
   Timer? _microMotionTimer;
   Timer? _expressionRelaxTimer;
   Timer? _facialDetailTimer;
@@ -195,7 +194,6 @@ class _ChatScreenState extends State<ChatScreen> {
   List<_CachedSpeechSegment> _lastSpeech = const [];
   int _motionGeneration = 0;
   int _replyGeneration = 0;
-  int _textFollowGeneration = 0;
   int? _activeAssistantSegmentIndex;
   Duration _activeSegmentDisplayDuration = Duration.zero;
   StreamIterator<String>? _replyIterator;
@@ -538,7 +536,6 @@ class _ChatScreenState extends State<ChatScreen> {
     AudioAmplitudeEnvelope? envelope,
     bool awaitingAudio = false,
   }) {
-    _speechFallbackTimer?.cancel();
     _syntheticSpeech = !awaitingAudio;
     _playbackPosition = Duration.zero;
     _positionClock
@@ -565,7 +562,6 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _stopSpeakingAnimation() {
-    _speechFallbackTimer?.cancel();
     _microMotionTimer?.cancel();
     _facialDetailTimer?.cancel();
     _blinkTimer?.cancel();
@@ -1029,7 +1025,6 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void dispose() {
     _replyGeneration += 1;
-    _textFollowGeneration += 1;
     final replyIterator = _replyIterator;
     _replyIterator = null;
     if (replyIterator != null) unawaited(replyIterator.cancel());
@@ -1050,7 +1045,6 @@ class _ChatScreenState extends State<ChatScreen> {
     _effectPlayer.dispose();
     _idleTimer?.cancel();
     _tapReactionTimer?.cancel();
-    _speechFallbackTimer?.cancel();
     _microMotionTimer?.cancel();
     _expressionRelaxTimer?.cancel();
     _facialDetailTimer?.cancel();
@@ -1182,8 +1176,6 @@ class _ChatScreenState extends State<ChatScreen> {
     final isAutomatic = automaticPrompt != null;
 
     _cancelSpeechPlayback();
-    _cancelTextFollow();
-
     _inputController.clear();
     if (!isAutomatic) {
       widget.controller.addUserMessage(text, attachments: attachments);
@@ -1472,10 +1464,8 @@ class _ChatScreenState extends State<ChatScreen> {
       return;
     }
     if (!widget.controller.fishTtsEnabled) {
-      _startSpeakingAnimation();
       _applyPerformanceFromResponse(text);
-      _scheduleSpeechFallback(text);
-      unawaited(_followTextResponse(text));
+      _stopSpeakingAnimation();
       return;
     }
     final segments = performanceSegmentsForAssistantResponse(
@@ -1484,7 +1474,6 @@ class _ChatScreenState extends State<ChatScreen> {
     );
     if (segments.isEmpty) {
       _stopSpeakingAnimation();
-      unawaited(_followTextResponse(text));
       return;
     }
     final apiKey = await _secretStore.readTtsKey(widget.controller.ttsProvider);
@@ -1503,10 +1492,8 @@ class _ChatScreenState extends State<ChatScreen> {
         'TTS',
         '跳过合成：${widget.controller.ttsProvider.label} 的密钥或必要配置缺失',
       );
-      _startSpeakingAnimation();
       _applyPerformanceFromResponse(text);
-      _scheduleSpeechFallback(text);
-      unawaited(_followTextResponse(text));
+      _stopSpeakingAnimation();
       return;
     }
     final generation = ++_speechPlaybackGeneration;
@@ -1536,12 +1523,6 @@ class _ChatScreenState extends State<ChatScreen> {
         apiKey,
         generation,
       );
-      final displaySegments = parseAssistantSegments(text)
-          .where(
-            (segment) => displayTextForAssistantSegment(segment).isNotEmpty,
-          )
-          .toList(growable: false);
-      var nextDisplayIndex = 0;
       for (var index = 0; index < segments.length; index++) {
         final prepared = await pending;
         if (!mounted || generation != _speechPlaybackGeneration) {
@@ -1553,21 +1534,10 @@ class _ChatScreenState extends State<ChatScreen> {
             : null;
         final segment = segments[index];
         final displayIndex = _displayIndexForRyzaSegment(text, index);
-        if (displayIndex != null && displayIndex > nextDisplayIndex) {
-          await _holdUnvoicedSegments(
-            displaySegments,
-            nextDisplayIndex,
-            displayIndex,
-            generation,
-            cancellation,
-          );
-          if (generation != _speechPlaybackGeneration) return;
-        }
         _showAssistantSegment(
           displayIndex,
           _readingDurationFor(segment.speechText),
         );
-        if (displayIndex != null) nextDisplayIndex = displayIndex + 1;
         if (segment.expression case final expression?) {
           _applyExpression(expression);
         }
@@ -1599,15 +1569,6 @@ class _ChatScreenState extends State<ChatScreen> {
         _stopSpeakingAnimation();
         if (next != null) pending = next;
       }
-      if (nextDisplayIndex < displaySegments.length) {
-        await _holdUnvoicedSegments(
-          displaySegments,
-          nextDisplayIndex,
-          displaySegments.length,
-          generation,
-          cancellation,
-        );
-      }
       await _replaceLastSpeech(completedSegments);
       RuntimeLog.instance.info(
         'TTS',
@@ -1630,10 +1591,8 @@ class _ChatScreenState extends State<ChatScreen> {
       for (final path in _temporarySpeechPaths.toList()) {
         unawaited(_deleteTemporarySpeech(path));
       }
-      _startSpeakingAnimation();
       _applyPerformanceFromResponse(text);
-      _scheduleSpeechFallback(text);
-      unawaited(_followTextResponse(text));
+      _stopSpeakingAnimation();
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -1835,24 +1794,6 @@ class _ChatScreenState extends State<ChatScreen> {
         .toInt(),
   );
 
-  Future<void> _holdUnvoicedSegments(
-    List<ChatSegment> segments,
-    int start,
-    int end,
-    int speechGeneration,
-    Completer<void> cancellation,
-  ) async {
-    for (var index = start; index < end; index++) {
-      if (!mounted || speechGeneration != _speechPlaybackGeneration) return;
-      final visible = displayTextForAssistantSegment(segments[index]);
-      final duration = Duration(
-        milliseconds: (visible.length * 55).clamp(5000, 10000).toInt(),
-      );
-      _showAssistantSegment(index, duration);
-      await Future.any([Future<void>.delayed(duration), cancellation.future]);
-    }
-  }
-
   int? _displayIndexForRyzaSegment(String response, int ryzaOrdinal) {
     var currentRyza = 0;
     final segments = parseAssistantSegments(response)
@@ -1877,41 +1818,6 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() {
       _activeAssistantSegmentIndex = index;
       _activeSegmentDisplayDuration = duration;
-    });
-  }
-
-  void _cancelTextFollow() {
-    _textFollowGeneration += 1;
-    _showAssistantSegment(null, Duration.zero);
-  }
-
-  Future<void> _followTextResponse(String response) async {
-    final generation = ++_textFollowGeneration;
-    final segments = parseAssistantSegments(response)
-        .where((segment) => displayTextForAssistantSegment(segment).isNotEmpty)
-        .toList(growable: false);
-    if (segments.isEmpty) return;
-    await Future<void>.delayed(const Duration(milliseconds: 350));
-    for (var index = 0; index < segments.length; index++) {
-      if (!mounted || generation != _textFollowGeneration) return;
-      final visibleLength = displayTextForAssistantSegment(segments[index])
-          .length;
-      final segmentMs = (visibleLength * 55).clamp(5000, 10000).toInt();
-      final duration = Duration(milliseconds: segmentMs);
-      _showAssistantSegment(index, duration);
-      await Future<void>.delayed(duration);
-    }
-    if (mounted && generation == _textFollowGeneration) {
-      _showAssistantSegment(null, Duration.zero);
-    }
-  }
-
-  void _scheduleSpeechFallback(String text) {
-    final visibleLength = displayTextForAssistantResponse(text).length;
-    final durationMs = (visibleLength * 55).clamp(5000, 10000).toInt();
-    _speechFallbackTimer?.cancel();
-    _speechFallbackTimer = Timer(Duration(milliseconds: durationMs), () {
-      if (mounted) _stopSpeakingAnimation();
     });
   }
 
