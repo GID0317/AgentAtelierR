@@ -4,7 +4,7 @@
 
 AgentAtelierR 是一个以 **Android 为主要开发平台**的 Flutter AI 角色陪伴实验项目，同时提供 Windows 本地构建路径。它将 LLM 对话、Spine 角色动画、语音合成、地图场景和本地记忆结合起来，探索更有连续感的角色互动体验。
 
-项目早期名为 **Ryza Chat**，现已更名为 **AgentAtelierR**。仓库名 `LLMAtelier-` 和 Dart 包名 `ryza_chat_mvp` 保留历史命名。现有角色设定以莱莎为参考，属于非官方实验项目，不代表原作官方产品或剧情。
+项目早期名为 **Ryza Chat**，现已更名为 **AgentAtelierR**，仓库也已从 `LLMAtelier-` 迁移至 `AgentAtelierR`；Dart 包名 `ryza_chat_mvp` 保留历史命名。现有角色设定以莱莎为参考，属于非官方实验项目，不代表原作官方产品或剧情。
 
 > **本仓库提供代码和实现方式，不提供原版游戏资源包。** 克隆代码不等于获得完整的角色体验。模型、纹理、地图、音频和动作映射需要自行准备具有相应使用权的资源，具体文件和目录见[资源接入与构建指南](docs/RESOURCE_SETUP_AND_BUILD.md)。
 
@@ -113,8 +113,8 @@ https://generativelanguage.googleapis.com/v1beta/openai
 ## 获取代码与构建
 
 ```powershell
-git clone https://github.com/onion-aqua/LLMAtelier-.git
-cd LLMAtelier-
+git clone https://github.com/onion-aqua/AgentAtelierR.git
+cd AgentAtelierR
 flutter doctor -v
 ```
 
@@ -171,7 +171,7 @@ Windows 还需要 **Visual Studio 的 C++ 桌面开发工作负载**和 Windows 
 | 2026-09-07 | 0.7.0 | 聊天 UI 隐藏/恢复及版本标识整理 |
 | 2026-09-08 | 对话节奏调整 | 移除无语音对话的固定等待 |
 
-详细记录：[9 月 4 日更新日志](docs/CHANGELOG_2026-09-04.md) · [完整提交历史](https://github.com/onion-aqua/LLMAtelier-/commits/main/)。
+详细记录：[9 月 4 日更新日志](docs/CHANGELOG_2026-09-04.md) · [完整提交历史](https://github.com/onion-aqua/AgentAtelierR/commits/main/)。
 
 ### 后续开发进展
 
