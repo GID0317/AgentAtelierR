@@ -75,6 +75,10 @@ flutter:
     - assets/character/ryza/
     - assets/character/ryza/crf_skn_002_0001_01/
     - assets/character/ryza/crf_skn_002_0001_99/
+    - assets/character/ryza/crf_skn_002_0002_01/
+    - assets/character/ryza/crf_skn_002_0003_01/
+    - assets/character/ryza/crf_skn_002_0004_01/
+    - assets/character/ryza/crf_skn_002_0005_01/
     - assets/spine/objects/obj_001/
     - assets/images/
     - assets/images/chara_icons/

@@ -1,0 +1,57 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:ryza_chat_mvp/src/chat_segments.dart';
+
+void main() {
+  test('tavern-style wrapped asides stay outside character dialogue', () {
+    const response = '''<|assistant|>
+*莱莎抬起头，耳朵轻轻动了一下。*
+莱莎：[happy][face:happy][action:acknowledge] 你来啦！
+*她把手里的素材放回桌面。*
+莱莎：我们继续研究吧。''';
+
+    final segments = parseAssistantSegments(response);
+    expect(segments.map((segment) => segment.speaker), [
+      ChatSpeaker.narrator,
+      ChatSpeaker.ryza,
+      ChatSpeaker.narrator,
+      ChatSpeaker.ryza,
+    ]);
+    expect(segments[0].text, '莱莎抬起头，耳朵轻轻动了一下。');
+    expect(
+      groupAssistantSegmentsForDisplay(response)
+          .map((run) => run.first.speaker),
+      [
+        ChatSpeaker.narrator,
+        ChatSpeaker.ryza,
+        ChatSpeaker.narrator,
+        ChatSpeaker.ryza,
+      ],
+    );
+  });
+
+  test(
+    'role prefixes accept localized character ids and transport markers',
+    () {
+      const response = '''### Assistant:
+角色[莉拉]：别急，先观察材料的反应。
+译文：Wait and observe the material first.''';
+
+      final segments = parseAssistantSegments(response);
+      expect(segments, hasLength(2));
+      expect(segments.first.speaker, ChatSpeaker.character);
+      expect(segments.first.characterId, '莉拉');
+      expect(segments.last.speaker, ChatSpeaker.translation);
+    },
+  );
+
+  test('inline speaker prefixes are split into separate display runs', () {
+    final runs = groupAssistantSegmentsForDisplay(
+      '旁白：风吹过工房。 莱莎：准备好了吗？ 旁白：她握紧了拳头。',
+    );
+    expect(runs.map((run) => run.first.speaker), [
+      ChatSpeaker.narrator,
+      ChatSpeaker.ryza,
+      ChatSpeaker.narrator,
+    ]);
+  });
+}

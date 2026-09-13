@@ -128,6 +128,215 @@ void main() {
     },
   );
 
+  test('syllable energy cannot modulate head, body or eye motion', () {
+    final steady = CharacterPerformanceDirector(fixture(), random: Random(7));
+    final pulsed = CharacterPerformanceDirector(fixture(), random: Random(7));
+    for (var i = 0; i < 900; i++) {
+      final baseline = steady.sample(
+        delta: 1 / 60,
+        emotion: i < 450 ? 'happy' : 'sad',
+        speaking: true,
+        energy: 0,
+      );
+      final frame = pulsed.sample(
+        delta: 1 / 60,
+        emotion: i < 450 ? 'happy' : 'sad',
+        speaking: true,
+        energy: (sin(i / 60 * 2 * pi * 5.2) + 1) / 2,
+      );
+      for (final part in baseline.keys) {
+        expect(frame[part]!.yaw, baseline[part]!.yaw);
+        expect(frame[part]!.pitch, baseline[part]!.pitch);
+        expect(frame[part]!.roll, baseline[part]!.roll);
+      }
+    }
+  });
+
+  test('speaking begins and ends smoothly and a held pose comes to rest', () {
+    final director = CharacterPerformanceDirector(fixture(), random: Random(1));
+    Map<String, RigMotion> frame = {};
+    for (var i = 0; i < 120; i++) {
+      frame = director.sample(
+        delta: 1 / 60,
+        emotion: 'happy',
+        speaking: false,
+        energy: 0,
+      );
+    }
+    expect(frame['head']!.yaw, closeTo(0.15, 0.001));
+    final beforeSpeaking = frame['head']!.yaw;
+    frame = director.sample(
+      delta: 1 / 60,
+      emotion: 'happy',
+      speaking: true,
+      energy: 1,
+    );
+    expect(frame['head']!.yaw - beforeSpeaking, inExclusiveRange(0, 0.02));
+    for (var i = 0; i < 240; i++) {
+      frame = director.sample(
+        delta: 1 / 60,
+        emotion: 'happy',
+        speaking: true,
+        energy: i.isEven ? 0 : 1,
+      );
+    }
+    expect(frame['head']!.yaw, closeTo(0.425, 0.0001));
+    final beforeRelease = frame['head']!.yaw;
+    frame = director.sample(
+      delta: 1 / 60,
+      emotion: 'happy',
+      speaking: false,
+      energy: 0,
+    );
+    expect(beforeRelease - frame['head']!.yaw, inExclusiveRange(0, 0.02));
+    final beforeSuppress = frame['head']!.yaw;
+    frame = director.sample(
+      delta: 1 / 60,
+      emotion: 'happy',
+      speaking: false,
+      energy: 0,
+      suppressed: true,
+    );
+    expect(frame['head']!.yaw, greaterThan(beforeSuppress * 0.8));
+    for (var i = 0; i < 120; i++) {
+      frame = director.sample(
+        delta: 1 / 60,
+        emotion: 'happy',
+        speaking: false,
+        energy: 0,
+        suppressed: true,
+      );
+    }
+    expect(frame['head']!.yaw.abs(), lessThan(0.0001));
+  });
+
+  test(
+    'switching the lead part preserves each current pose before blending',
+    () {
+      final profile = CharacterPerformanceProfile.parse(
+        jsonEncode({
+          'emotionalGesture': {
+            'DriverDefs': [
+              for (final part in ['head', 'body'])
+                {
+                  'Spec': jsonEncode({
+                    'id': '${part}_n_1',
+                    'driver': part,
+                    'yawMin': part == 'head' ? 0.7 : -0.7,
+                    'yawMax': part == 'head' ? 0.7 : -0.7,
+                    'transitionMin': 0.6,
+                    'transitionMax': 0.6,
+                    'holdMin': 3,
+                    'holdMax': 3,
+                    'followers': [
+                      {
+                        'part': part == 'head' ? 'eye' : 'head',
+                        'scale': 0.3,
+                        'delay': 0.2,
+                      },
+                    ],
+                  }),
+                },
+            ],
+          },
+        }),
+      );
+      final director = CharacterPerformanceDirector(profile, random: Random(2));
+      Map<String, RigMotion> frame = {};
+      for (var i = 0; i < 180; i++) {
+        frame = director.sample(
+          delta: 1 / 60,
+          emotion: 'head',
+          speaking: true,
+          energy: 1,
+        );
+      }
+      expect(frame['head']!.yaw, greaterThan(0.5));
+      expect(frame['body']!.yaw, 0);
+      final before = frame;
+      frame = director.sample(
+        delta: 0,
+        emotion: 'body',
+        speaking: true,
+        energy: 1,
+      );
+      for (final part in before.keys) {
+        expect(frame[part]!.yaw, before[part]!.yaw);
+      }
+      for (var i = 0; i < 180; i++) {
+        final previous = frame;
+        frame = director.sample(
+          delta: 1 / 60,
+          emotion: 'body',
+          speaking: true,
+          energy: 1,
+        );
+        for (final part in previous.keys) {
+          expect(
+            (frame[part]!.yaw - previous[part]!.yaw).abs(),
+            lessThan(0.04),
+          );
+        }
+      }
+      expect(frame['body']!.yaw, lessThan(-0.5));
+      expect(frame['head']!.yaw, closeTo(-0.7 * 0.3 * 0.85, 0.001));
+      expect(frame['eye']!.yaw.abs(), lessThan(0.001));
+    },
+  );
+
+  test('unsupported resources fall back to bounded target and hold motion', () {
+    final profile = CharacterPerformanceProfile.parse(
+      jsonEncode({
+        'rigConfig': {
+          'aimSlots': {
+            'head': {'bone': 'declared_head'},
+          },
+        },
+        'emotionalGesture': {
+          'attitudes': {'talk_low': 'not a legacy driver'},
+        },
+      }),
+    );
+    expect(profile.hasResourceDrivers, isFalse);
+    expect(profile.aimBones['head'], 'declared_head');
+    expect(CharacterPerformanceProfile.fallback().aimBones, isEmpty);
+    final director = CharacterPerformanceDirector(profile, random: Random(3));
+    var moved = false;
+    Map<String, RigMotion> frame = {};
+    for (var i = 0; i < 10000; i++) {
+      frame = director.sample(
+        delta: 1 / 60,
+        emotion: 'happy',
+        speaking: true,
+        energy: 1,
+      );
+      moved = moved || frame['head']!.yaw.abs() > 0.001;
+      expect(frame['head']!.yaw.abs(), lessThanOrEqualTo(0.08 * 0.85));
+      expect(frame['head']!.pitch.abs(), lessThanOrEqualTo(0.08 * 0.85));
+      expect(frame['head']!.roll.abs(), lessThanOrEqualTo(0.035 * 0.85));
+    }
+    expect(moved, isTrue);
+    final before = frame;
+    for (final delta in [
+      double.nan,
+      double.infinity,
+      double.negativeInfinity,
+      -1.0,
+    ]) {
+      frame = director.sample(
+        delta: delta,
+        emotion: 'happy',
+        speaking: true,
+        energy: double.nan,
+      );
+      for (final part in before.keys) {
+        expect(frame[part]!.yaw, before[part]!.yaw);
+        expect(frame[part]!.pitch, before[part]!.pitch);
+        expect(frame[part]!.roll, before[part]!.roll);
+      }
+    }
+  });
+
   test('playback interpolation is bounded and audio end closes the mouth', () {
     expect(
       interpolatedSpeechPosition(

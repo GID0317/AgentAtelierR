@@ -434,3 +434,14 @@ CharacterExpressionPreset characterExpressionPreset(
       : _seatedExpressionPresets;
   return presets[expression] ?? presets[CharacterExpression.neutral]!;
 }
+
+/// Mouth 019 is an authored transient rounded phoneme. Holding it after
+/// speech produces an unnatural permanent "o" mouth, so idle expressions use
+/// their stable preset instead. It remains available to authored animations.
+bool isStableIdleMouth(String? animation) {
+  if (animation == null || animation.isEmpty) return false;
+  final stem = animation.endsWith('_idle')
+      ? animation.substring(0, animation.length - '_idle'.length)
+      : animation;
+  return stem != 'facial_mouth_019';
+}

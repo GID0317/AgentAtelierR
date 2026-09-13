@@ -82,29 +82,54 @@ const characterAppearances = <CharacterAppearance>[
   CharacterAppearance(
     id: 'summer_yellow_01',
     label: '夏日泳装·黄色',
-    description: '原包服装预览资源；缺少对应 Spine 骨骼与纹理，仅支持静态展示',
+    description: '完整 Spine 服装与动作资源',
     promptDescription: '莱莎穿着黄白配色的花纹荷叶边泳装，上身带肩部褶边，下身搭配黄色褶边围裙式泳裙与青绿色细绳装饰；当前是坐姿。',
     assetName: 'crf_skn_002_0002_01',
-    animated: false,
-    idleAnimations: [],
+    animated: true,
+    idleAnimations: [
+      'motion_A_001_idle',
+      'motion_A_002_idle',
+      'motion_A_003_idle',
+    ],
   ),
   CharacterAppearance(
     id: 'summer_black_01',
     label: '夏日泳装·黑色',
-    description: '原包服装预览资源；缺少对应 Spine 骨骼与纹理，仅支持静态展示',
+    description: '完整 Spine 服装与动作资源',
     promptDescription: '莱莎穿着黑白配色的荷叶边泳装，下身搭配黑色褶边围裙式泳裙与青绿色细绳装饰；当前是坐姿。',
     assetName: 'crf_skn_002_0003_01',
-    animated: false,
-    idleAnimations: [],
+    animated: true,
+    idleAnimations: [
+      'motion_A_001_idle',
+      'motion_A_002_idle',
+      'motion_A_003_idle',
+    ],
   ),
   CharacterAppearance(
     id: 'relaxed_shirt_01',
     label: '休闲 T 恤',
-    description: '原包服装预览资源；缺少对应 Spine 骨骼与纹理，仅支持静态展示',
+    description: '完整 Spine 服装与动作资源',
     promptDescription: '莱莎穿着宽松的白色短袖长款 T 恤，袖口有黑色包边，胸前印着蓝色可爱图案；当前是坐姿。',
     assetName: 'crf_skn_002_0004_01',
-    animated: false,
-    idleAnimations: [],
+    animated: true,
+    idleAnimations: [
+      'motion_A_001_idle',
+      'motion_A_002_idle',
+      'motion_A_003_idle',
+    ],
+  ),
+  CharacterAppearance(
+    id: 'crf_skn_002_0005_01',
+    label: '夏日泳装·蓝白短裤',
+    description: '完整 Spine 服装与动作资源',
+    promptDescription: '莱莎穿着蓝白配色、金色滚边与红色细带的泳装上衣，搭配深蓝色短裤和浅蓝色腰带；头顶架着心形太阳镜，手腕戴有蓝色手镯、金色细环和花朵饰品；当前是坐姿。服装细节来自贴图，名称为应用内描述名，不是已确认的官方名称。',
+    assetName: 'crf_skn_002_0005_01',
+    animated: true,
+    idleAnimations: [
+      'motion_A_001_idle',
+      'motion_A_002_idle',
+      'motion_A_003_idle',
+    ],
   ),
 ];
 
@@ -146,10 +171,18 @@ Future<List<CharacterMotionGroup>> loadCharacterMotionGroups(
   CharacterAppearance appearance,
 ) async {
   final source = await rootBundle.loadString(appearance.gestureAsset);
+  return parseCharacterMotionGroups(source);
+}
+
+List<CharacterMotionGroup> parseCharacterMotionGroups(String source) {
   final json = jsonDecode(source) as Map<String, dynamic>;
   final emotionalGesture = json['emotionalGesture'] as Map<String, dynamic>;
   final groups = emotionalGesture['MotionGroups'] as List<dynamic>;
   final weightsByGroup = <String, Map<CharacterExpression, double>>{};
+  final weightsByPoseType =
+      <String, Map<CharacterExpression, Map<String, double>>>{};
+  double weight(Object? value) =>
+      value is num && value.isFinite && value > 0 ? value.toDouble() : 0;
   final profiles = emotionalGesture['EmotionProfilesV4'];
   if (profiles is Map<String, dynamic>) {
     for (final profileEntry in profiles.entries) {
@@ -160,17 +193,29 @@ Future<List<CharacterMotionGroup>> loadCharacterMotionGroups(
       if (intensityProfiles is! Map<String, dynamic>) continue;
       final normal = intensityProfiles['normal'];
       if (normal is! Map<String, dynamic>) continue;
+      final byPose = normal['armGroupWeightsByPoseType'];
+      if (byPose is Map<String, dynamic>) {
+        for (final poseEntry in byPose.entries) {
+          final poseWeights = poseEntry.value;
+          if (poseEntry.key.isEmpty || poseWeights is! Map<String, dynamic>) {
+            continue;
+          }
+          weightsByPoseType.putIfAbsent(poseEntry.key, () => {})[expression] = {
+            for (final entry in poseWeights.entries)
+              entry.key: weight(entry.value),
+          };
+        }
+      }
       Object? rawWeights = normal['armGroupWeights'];
       if (rawWeights == null) {
-        final byPose = normal['armGroupWeightsByPoseType'];
         if (byPose is Map<String, dynamic>) rawWeights = byPose[''];
       }
       if (rawWeights is! Map<String, dynamic>) continue;
       for (final weightEntry in rawWeights.entries) {
-        final weight = (weightEntry.value as num?)?.toDouble() ?? 0;
-        if (weight <= 0) continue;
+        final value = weight(weightEntry.value);
+        if (value <= 0) continue;
         weightsByGroup.putIfAbsent(weightEntry.key, () => {})[expression] =
-            weight;
+            value;
       }
     }
   }
@@ -181,6 +226,14 @@ Future<List<CharacterMotionGroup>> loadCharacterMotionGroups(
           group,
           emotionWeights:
               weightsByGroup[group['GroupId'] as String? ?? ''] ?? const {},
+          emotionWeightsByPoseType: {
+            for (final poseEntry in weightsByPoseType.entries)
+              poseEntry.key: {
+                for (final expressionEntry in poseEntry.value.entries)
+                  expressionEntry.key:
+                      expressionEntry.value[group['GroupId']] ?? 0,
+              },
+          },
         ),
       )
       .where((group) => group.animation1.isNotEmpty)
@@ -200,7 +253,9 @@ class CharacterMotionGroup {
     required this.speed2,
     required this.blendTime,
     required this.applicablePoseIds,
+    this.applicableSittingIds = const [],
     this.emotionWeights = const {},
+    this.emotionWeightsByPoseType = const {},
   });
 
   final String id;
@@ -214,12 +269,17 @@ class CharacterMotionGroup {
   final double speed2;
   final double blendTime;
   final List<String> applicablePoseIds;
+  final List<String> applicableSittingIds;
   final Map<CharacterExpression, double> emotionWeights;
+  final Map<String, Map<CharacterExpression, double>> emotionWeightsByPoseType;
 
   bool supportsPose(String? pose) =>
       pose == null ||
       applicablePoseIds.isEmpty ||
       applicablePoseIds.contains(pose);
+
+  bool supportsSitting([String sittingId = 'sitting_normal']) =>
+      applicableSittingIds.isEmpty || applicableSittingIds.contains(sittingId);
 
   List<int> get occupiedTracks => occupancy
       .split('')
@@ -230,6 +290,8 @@ class CharacterMotionGroup {
   factory CharacterMotionGroup.fromJson(
     Map<String, dynamic> json, {
     Map<CharacterExpression, double> emotionWeights = const {},
+    Map<String, Map<CharacterExpression, double>> emotionWeightsByPoseType =
+        const {},
   }) {
     double number(String key, [double fallback = 1]) =>
         double.tryParse(json[key] as String? ?? '') ?? fallback;
@@ -251,12 +313,38 @@ class CharacterMotionGroup {
           .map((value) => value.trim())
           .where((value) => value.isNotEmpty)
           .toList(growable: false),
+      applicableSittingIds: (json['ApplicableSittingIDs'] as String? ?? '')
+          .split(',')
+          .map((value) => value.trim())
+          .where((value) => value.isNotEmpty)
+          .toList(growable: false),
       emotionWeights: Map.unmodifiable(emotionWeights),
+      emotionWeightsByPoseType: Map.unmodifiable({
+        for (final entry in emotionWeightsByPoseType.entries)
+          entry.key: Map<CharacterExpression, double>.unmodifiable(entry.value),
+      }),
     );
   }
 
-  double weightFor(CharacterExpression expression) =>
-      emotionWeights[expression] ?? 0;
+  double weightFor(CharacterExpression expression, {String? poseType}) =>
+      emotionWeightsByPoseType[poseType]?[expression] ??
+      emotionWeights[expression] ??
+      0;
+
+  CharacterExpression pairedExpression(CharacterExpression current) {
+    // Preserve a compatible face; otherwise use the strongest authored weight.
+    if (weightFor(current) > 0) return current;
+    var best = current;
+    var weight = 0.0;
+    for (final expression in CharacterExpression.values) {
+      final candidate = weightFor(expression);
+      if (candidate > weight) {
+        weight = candidate;
+        best = expression;
+      }
+    }
+    return best;
+  }
 }
 
 CharacterMotionGroup? selectCharacterAmbientMotionGroup({
@@ -267,32 +355,30 @@ CharacterMotionGroup? selectCharacterAmbientMotionGroup({
   required Random random,
   required bool allowLargePostureChanges,
   double explorationChance = 0.2,
+  bool authoredOnly = false,
+  String sittingId = 'sitting_normal',
+  String? poseType,
 }) {
+  bool allowed(CharacterMotionGroup group) =>
+      group.supportsPose(pose) &&
+      group.supportsSitting(sittingId) &&
+      group.occupiedTracks.isNotEmpty &&
+      (allowLargePostureChanges || !group.occupancy.contains('C')) &&
+      (!authoredOnly || group.weightFor(expression, poseType: poseType) > 0);
   var compatible = groups
-      .where(
-        (group) =>
-            group.supportsPose(pose) &&
-            group.occupiedTracks.isNotEmpty &&
-            !recentGroupIds.contains(group.id) &&
-            (allowLargePostureChanges || !group.occupancy.contains('C')),
-      )
+      .where((group) => allowed(group) && !recentGroupIds.contains(group.id))
       .toList();
   if (compatible.isEmpty && recentGroupIds.isNotEmpty) {
-    compatible = groups
-        .where(
-          (group) =>
-              group.supportsPose(pose) &&
-              group.occupiedTracks.isNotEmpty &&
-              (allowLargePostureChanges || !group.occupancy.contains('C')),
-        )
-        .toList();
+    compatible = groups.where(allowed).toList();
   }
   if (compatible.isEmpty) return null;
 
   final preferred = compatible
-      .where((group) => group.weightFor(expression) > 0)
+      .where((group) => group.weightFor(expression, poseType: poseType) > 0)
       .toList();
-  final explore = preferred.isEmpty || random.nextDouble() < explorationChance;
+  final explore =
+      !authoredOnly &&
+      (preferred.isEmpty || random.nextDouble() < explorationChance);
   final pool = explore ? compatible : preferred;
   if (explore) return pool[random.nextInt(pool.length)];
 
@@ -303,11 +389,15 @@ CharacterMotionGroup? selectCharacterAmbientMotionGroup({
   final total = pool.fold<double>(
     0,
     (sum, group) =>
-        sum + group.weightFor(expression) / variantsPerId[group.id]!,
+        sum +
+        group.weightFor(expression, poseType: poseType) /
+            variantsPerId[group.id]!,
   );
   var target = random.nextDouble() * total;
   for (final group in pool) {
-    target -= group.weightFor(expression) / variantsPerId[group.id]!;
+    target -=
+        group.weightFor(expression, poseType: poseType) /
+        variantsPerId[group.id]!;
     if (target <= 0) return group;
   }
   return pool.last;

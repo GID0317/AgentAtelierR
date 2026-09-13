@@ -17,8 +17,13 @@ class ChatSegment {
 }
 
 final RegExp _speakerPrefix = RegExp(
-  r'^\s*(旁白|莱莎|译文|角色\s*\[\s*([a-zA-Z0-9_-]+)\s*\])\s*[：:]\s*',
+  r'^\s*(旁白|莱莎|译文|narrator|ryza|translation|角色\s*\[\s*([^\]\r\n]+?)\s*\])\s*[：:]\s*',
   multiLine: true,
+  caseSensitive: false,
+);
+final RegExp _inlineSpeakerPrefix = RegExp(
+  r'(旁白|莱莎|译文|narrator|ryza|translation|角色\s*\[\s*([^\]\r\n]+?)\s*\])\s*[：:]',
+  caseSensitive: false,
 );
 final RegExp _fishCue = RegExp(r'\[[^\[\]\r\n]+\]');
 final RegExp _faceCue = RegExp(
@@ -46,6 +51,7 @@ const _deliveryCues = {
   'shouting',
   'screaming',
   'whispering',
+  'unvoiced whispering',
   'whisper',
   'near-whisper',
   'soft tone',
@@ -139,22 +145,35 @@ const _fishEmotionCues = {
   'warm and happy',
 };
 final RegExp _standaloneAction = RegExp(r'^\s*[（(].*[）)]\s*$');
+final RegExp _standaloneAsteriskNarration = RegExp(r'^\s*\*\s*(.+?)\s*\*\s*$');
+final RegExp _standaloneUnderscoreNarration = RegExp(r'^\s*＿\s*(.+?)\s*＿\s*$');
+final RegExp _metadataLine = RegExp(
+  r'^\s*(?:<\|[^\r\n|]+\|>|```+|(?:###\s*)?(?:assistant|user|system)\s*:?)\s*$',
+  caseSensitive: false,
+);
 
 List<ChatSegment> parseAssistantSegments(String response) {
   final segments = <ChatSegment>[];
   ChatSpeaker? activeSpeaker;
   String? activeCharacterId;
 
-  for (final rawLine in response.replaceAll('\r\n', '\n').split('\n')) {
+  for (final rawLine in _expandInlineSpeakerLines(response)) {
     final line = rawLine.trim();
     if (line.isEmpty) continue;
+    // Chat templates sometimes leak role markers into the visible stream.
+    // They are transport metadata, never dialogue and never narration.
+    if (_metadataLine.hasMatch(line)) continue;
 
     final prefix = _speakerPrefix.firstMatch(line);
     if (prefix != null) {
-      activeSpeaker = switch (prefix.group(1)) {
+      final label = prefix.group(1)?.toLowerCase();
+      activeSpeaker = switch (label) {
         '旁白' => ChatSpeaker.narrator,
         '译文' => ChatSpeaker.translation,
         '莱莎' => ChatSpeaker.ryza,
+        'narrator' => ChatSpeaker.narrator,
+        'translation' => ChatSpeaker.translation,
+        'ryza' => ChatSpeaker.ryza,
         _ => ChatSpeaker.character,
       };
       activeCharacterId = activeSpeaker == ChatSpeaker.character
@@ -173,21 +192,54 @@ List<ChatSegment> parseAssistantSegments(String response) {
       continue;
     }
 
-    final speaker = _standaloneAction.hasMatch(line)
+    final asteriskNarration = _standaloneAsteriskNarration.firstMatch(line);
+    final underscoreNarration = _standaloneUnderscoreNarration.firstMatch(line);
+    final isWrappedNarration =
+        _standaloneAction.hasMatch(line) ||
+        asteriskNarration != null ||
+        underscoreNarration != null;
+    final speaker = isWrappedNarration
         ? ChatSpeaker.narrator
         : (activeSpeaker ?? ChatSpeaker.ryza);
+    final content =
+        asteriskNarration?.group(1) ?? underscoreNarration?.group(1) ?? line;
     segments.add(
       ChatSegment(
         speaker: speaker,
-        text: line,
+        text: content,
         characterId: speaker == ChatSpeaker.character
             ? activeCharacterId
             : null,
       ),
     );
+    // A wrapped aside is a self-contained narration beat. Do not let the
+    // following unprefixed dialogue inherit narrator as its speaker.
+    if (isWrappedNarration) {
+      activeSpeaker = null;
+      activeCharacterId = null;
+    }
   }
 
   return segments;
+}
+
+/// Some chat-template/Tavern backends emit two speaker-prefixed beats on one
+/// physical line. Split those boundaries before the stateful line parser so a
+/// narrator beat cannot be swallowed into the preceding Ryza bubble.
+Iterable<String> _expandInlineSpeakerLines(String response) sync* {
+  for (final rawLine in response.replaceAll('\r\n', '\n').split('\n')) {
+    final matches = _inlineSpeakerPrefix.allMatches(rawLine).toList();
+    if (matches.length <= 1) {
+      yield rawLine;
+      continue;
+    }
+    var cursor = 0;
+    for (final match in matches) {
+      if (match.start > cursor) yield rawLine.substring(cursor, match.start);
+      cursor = match.start;
+    }
+    yield rawLine.substring(cursor);
+  }
 }
 
 List<List<ChatSegment>> groupAssistantSegmentsForDisplay(String response) {
@@ -233,20 +285,30 @@ String ensureFishEmotionCue(String text, CharacterMood fallbackMood) {
   return '${fishEmotionForMood(fallbackMood)} $trimmed';
 }
 
-String applyFishEmotionIntensity(String text, TtsEmotionIntensity intensity) {
+String? _primaryFishEmotion(String cue) {
+  final body = cue.substring(1, cue.length - 1).trim();
+  // Delivery cues such as "very breathy voice" are not emotion modifiers.
+  if (_deliveryCues.contains(body.toLowerCase())) return null;
+  final emotion = body.replaceFirst(_emotionStrengthPrefix, '').trim();
+  return _fishEmotionCues.contains(emotion.toLowerCase()) ? emotion : null;
+}
+
+String applyFishEmotionIntensity(
+  String text,
+  TtsEmotionIntensity intensity, {
+  bool asmr = false,
+}) {
   final ensured = text.trim();
   final match = _leadingFishCue.firstMatch(ensured);
   if (match == null) return ensured;
   final cue = match.group(0)!.trim();
-  final cueBody = cue.substring(1, cue.length - 1).trim();
-  final baseEmotion = cueBody.replaceFirst(_emotionStrengthPrefix, '').trim();
-  if (_deliveryCues.contains(baseEmotion.toLowerCase())) return ensured;
-  if (!_fishEmotionCues.contains(baseEmotion.toLowerCase())) return ensured;
+  final baseEmotion = _primaryFishEmotion(cue);
+  if (baseEmotion == null) return ensured;
 
   final replacement = switch (intensity) {
     TtsEmotionIntensity.off => '',
     TtsEmotionIntensity.natural => '[$baseEmotion]',
-    _ => '[${_fishPerformanceDirection(baseEmotion, intensity)}]',
+    _ => '[${_fishPerformanceDirection(baseEmotion, intensity, asmr: asmr)}]',
   };
   return '$replacement${ensured.substring(match.end)}'.trim();
 }
@@ -256,18 +318,11 @@ String applyFishEmotionIntensityPerSentence(
   String text,
   TtsEmotionIntensity intensity, {
   TtsCueDensity density = TtsCueDensity.normal,
+  bool asmr = false,
 }) {
   final input = text.trim();
   if (input.isEmpty) return input;
-  final leading = _leadingFishCue.firstMatch(input);
-  final emotion = leading == null
-      ? 'relaxed'
-      : leading.group(0)!.substring(1, leading.group(0)!.length - 1).trim();
-  final body = leading == null
-      ? input
-      : input.substring(leading.end).trimLeft();
-  if (body.isEmpty) return input;
-  final sentences = body
+  final sentences = input
       .split(RegExp(r'(?<=[。！？!?；;])\s*|(?<=[.!?])\s+'))
       .map((part) => part.trim())
       .where((part) => part.isNotEmpty)
@@ -285,37 +340,93 @@ String applyFishEmotionIntensityPerSentence(
     TtsCueDensity.frequent => 2,
     TtsCueDensity.everySentence => 999,
   };
-  return [
-    for (var index = 0; index < sentences.length; index++)
-      if (index % emotionInterval == 0)
-        applyFishEmotionIntensity(
-          '[$emotion] ${_limitInlineDeliveryCues(sentences[index], inlineCueLimit)}',
+  // Preserve delivery-only or free-form preview cues without inventing a mood.
+  String? emotion = _leadingFishCue.hasMatch(input) ? null : 'relaxed';
+  var spokenSentenceIndex = 0;
+  var totalDeliveryCues = 0;
+  final output = <String>[];
+  // Density off also disables ASMR-specific performance directions.
+  final quietDelivery = asmr && density != TtsCueDensity.off;
+  for (final sentence in sentences) {
+    var body = sentence;
+    String? explicitEmotion;
+    final leadingDelivery = StringBuffer();
+    while (true) {
+      final leading = _leadingFishCue.firstMatch(body);
+      if (leading == null) break;
+      final cue = leading.group(0)!.trim();
+      final primary = _primaryFishEmotion(cue);
+      if (primary == null) {
+        leadingDelivery.write('$cue ');
+      } else {
+        explicitEmotion = primary;
+      }
+      body = body.substring(leading.end).trimLeft();
+    }
+    if (explicitEmotion != null) emotion = explicitEmotion;
+    final sentenceEmotion = emotion;
+    body = '$leadingDelivery$body';
+    final hasSpeech = body.replaceAll(_fishCue, '').trim().isNotEmpty;
+    var sentenceDeliveryCues = 0;
+    body = body
+        .replaceAllMapped(_fishCue, (match) {
+          final cue = match.group(0)!;
+          final primary = _primaryFishEmotion(cue);
+          if (primary != null) {
+            // Respect a deliberate inline transition and inherit it afterwards.
+            emotion = primary;
+            return applyFishEmotionIntensity(
+              cue,
+              intensity,
+              asmr: quietDelivery,
+            );
+          }
+          final name = cue.substring(1, cue.length - 1).trim().toLowerCase();
+          if (!_deliveryCues.contains(name)) return cue;
+          final retained = density == TtsCueDensity.sparse
+              ? totalDeliveryCues
+              : sentenceDeliveryCues;
+          if (retained >= inlineCueLimit) return '';
+          totalDeliveryCues += 1;
+          sentenceDeliveryCues += 1;
+          return cue;
+        })
+        .replaceAll(RegExp(r' {2,}'), ' ')
+        .trim();
+    if (hasSpeech) {
+      // An explicit emotion replaces the inherited one, never stacks with it.
+      if (sentenceEmotion != null &&
+          (explicitEmotion != null ||
+              spokenSentenceIndex % emotionInterval == 0)) {
+        body = applyFishEmotionIntensity(
+          '[$sentenceEmotion] $body',
           intensity,
-        )
-      else
-        _limitInlineDeliveryCues(sentences[index], inlineCueLimit),
-  ].join(' ');
-}
-
-String _limitInlineDeliveryCues(String text, int limit) {
-  var retained = 0;
-  return text
-      .replaceAllMapped(_fishCue, (match) {
-        final cue = match.group(0)!;
-        final name = cue.substring(1, cue.length - 1).trim().toLowerCase();
-        if (!_deliveryCues.contains(name)) return cue;
-        if (retained >= limit) return '';
-        retained += 1;
-        return cue;
-      })
-      .replaceAll(RegExp(r' {2,}'), ' ')
-      .trim();
+          asmr: quietDelivery,
+        );
+      }
+      spokenSentenceIndex += 1;
+    }
+    // A trailing [pause] is not another sentence to retag.
+    if (body.isNotEmpty) output.add(body);
+  }
+  return output.join(' ');
 }
 
 String _fishPerformanceDirection(
   String emotion,
-  TtsEmotionIntensity intensity,
-) {
+  TtsEmotionIntensity intensity, {
+  bool asmr = false,
+}) {
+  if (asmr) {
+    final strength = switch (intensity) {
+      TtsEmotionIntensity.restrained => 'slightly',
+      TtsEmotionIntensity.vivid => 'clearly',
+      TtsEmotionIntensity.dramatic => 'intensely',
+      _ => '',
+    };
+    return '$strength $emotion, expressed through very quiet whispering, '
+        'with emotional phrasing and breath timing while keeping the voice hushed';
+  }
   final normalized = emotion.toLowerCase();
   final family = switch (normalized) {
     'happy' => _FishEmotionFamily.happy,
@@ -328,8 +439,15 @@ String _fishPerformanceDirection(
     'anxious' ||
     'nervous' ||
     'uncertain' => _FishEmotionFamily.worried,
-    'empathetic' ||
     'sad' ||
+    'depressed' ||
+    'unhappy' ||
+    'lonely' ||
+    'disappointed' ||
+    'regretful' ||
+    'guilty' ||
+    'ashamed' => _FishEmotionFamily.melancholy,
+    'empathetic' ||
     'compassionate' ||
     'sympathetic' ||
     'moved' => _FishEmotionFamily.empathetic,
@@ -345,11 +463,14 @@ String _fishPerformanceDirection(
     'sarcastic' => _FishEmotionFamily.sarcastic,
     'delighted' ||
     'enthusiastic' ||
+    'warm and happy' => _FishEmotionFamily.happy,
     'encouraging' ||
     'grateful' ||
     'hopeful' ||
-    'friendly' ||
-    'warm and happy' => _FishEmotionFamily.happy,
+    'optimistic' ||
+    'relieved' ||
+    'satisfied' ||
+    'friendly' => _FishEmotionFamily.gentlePositive,
     'relaxed' || 'calm' => _FishEmotionFamily.calm,
     _ => _FishEmotionFamily.other,
   };
@@ -357,51 +478,75 @@ String _fishPerformanceDirection(
   return switch ((family, intensity)) {
     (_, TtsEmotionIntensity.restrained) =>
       'slightly $emotion, with subtle and restrained expression',
-    (_FishEmotionFamily.happy, TtsEmotionIntensity.vivid) => 'clearly happy, bright and lively, with noticeable pitch and rhythm changes',
-    (_FishEmotionFamily.happy, TtsEmotionIntensity.dramatic) => 'delighted and highly animated, with strong joyful pitch changes and emphatic rhythm',
+    (_FishEmotionFamily.happy, TtsEmotionIntensity.vivid) =>
+      'clearly $emotion, bright and lively, with expressive phrasing and flowing rhythm',
+    (_FishEmotionFamily.happy, TtsEmotionIntensity.dramatic) =>
+      'intensely $emotion, with rich joyful expression and continuous rhythmic phrasing',
+    (_FishEmotionFamily.gentlePositive, TtsEmotionIntensity.vivid) =>
+      'clearly $emotion, with measured warmth and a gradual lift in phrasing',
+    (_FishEmotionFamily.gentlePositive, TtsEmotionIntensity.dramatic) =>
+      'deeply $emotion, with heartfelt emphasis and a gradual emotional transition',
     (_FishEmotionFamily.curious, TtsEmotionIntensity.vivid) =>
-      'genuinely curious and engaged, with lively questioning intonation',
-    (_FishEmotionFamily.curious, TtsEmotionIntensity.dramatic) => 'fascinated and intensely curious, with large questioning pitch changes and eager emphasis',
-    (_FishEmotionFamily.excited, TtsEmotionIntensity.vivid) => 'very excited, energetic and animated, with quick pitch and rhythm changes',
-    (_FishEmotionFamily.excited, TtsEmotionIntensity.dramatic) => 'ecstatic and highly animated, with strong pitch changes, emphatic stress and energetic rhythm',
+      'clearly $emotion and engaged, with lively questioning intonation',
+    (_FishEmotionFamily.curious, TtsEmotionIntensity.dramatic) =>
+      'intensely $emotion, with sustained questioning intonation and eager emphasis',
+    (_FishEmotionFamily.excited, TtsEmotionIntensity.vivid) =>
+      'very $emotion, energetic and animated, with flowing pitch and rhythm',
+    (_FishEmotionFamily.excited, TtsEmotionIntensity.dramatic) =>
+      'intensely $emotion, with sustained expressive phrasing and energetic rhythm',
     (_FishEmotionFamily.confident, TtsEmotionIntensity.vivid) =>
-      'clearly confident and spirited, with firm emphasis and lively pacing',
-    (_FishEmotionFamily.confident, TtsEmotionIntensity.dramatic) => 'boldly confident and commanding, with powerful emphasis and pronounced rhythmic changes',
+      'clearly $emotion, with firm emphasis and steady pacing',
+    (_FishEmotionFamily.confident, TtsEmotionIntensity.dramatic) =>
+      'intensely $emotion, with assured emphasis and deliberate rhythm',
     (_FishEmotionFamily.surprised, TtsEmotionIntensity.vivid) =>
-      'visibly surprised, with a sharp pitch rise and animated reaction',
-    (_FishEmotionFamily.surprised, TtsEmotionIntensity.dramatic) => 'astonished and highly reactive, with a dramatic pitch rise, gasp-like energy and strong emphasis',
+      'clearly $emotion, with a responsive pitch rise and animated reaction',
+    (_FishEmotionFamily.surprised, TtsEmotionIntensity.dramatic) =>
+      'intensely $emotion, with a marked pitch rise and strong reactive emphasis',
     (_FishEmotionFamily.worried, TtsEmotionIntensity.vivid) =>
-      'clearly worried and tense, with unsteady pitch and urgent pacing',
-    (_FishEmotionFamily.worried, TtsEmotionIntensity.dramatic) => 'deeply anxious and emotionally shaken, with pronounced tension, trembling pitch and urgent emphasis',
-    (_FishEmotionFamily.empathetic, TtsEmotionIntensity.vivid) => 'deeply empathetic and tender, with warm expressive phrasing and gentle emphasis',
-    (_FishEmotionFamily.empathetic, TtsEmotionIntensity.dramatic) => 'profoundly moved and compassionate, with rich emotional pitch changes and heartfelt emphasis',
+      'clearly $emotion, with hesitant phrasing and sustained tension',
+    (_FishEmotionFamily.worried, TtsEmotionIntensity.dramatic) =>
+      'deeply $emotion, with pronounced tension and weighted hesitant phrasing',
+    (_FishEmotionFamily.melancholy, TtsEmotionIntensity.vivid) =>
+      'clearly $emotion, with subdued phrasing, weighted words and lingering pauses',
+    (_FishEmotionFamily.melancholy, TtsEmotionIntensity.dramatic) =>
+      'deeply $emotion, with sustained emotional weight and deliberate subdued phrasing',
+    (_FishEmotionFamily.empathetic, TtsEmotionIntensity.vivid) =>
+      'clearly $emotion, with attentive phrasing and considered emphasis',
+    (_FishEmotionFamily.empathetic, TtsEmotionIntensity.dramatic) =>
+      'deeply $emotion, with sustained feeling and heartfelt emphasis',
     (_FishEmotionFamily.angry, TtsEmotionIntensity.vivid) =>
-      'firmly angry, sharp and direct, with hard emphasis and clipped rhythm',
-    (_FishEmotionFamily.angry, TtsEmotionIntensity.dramatic) => 'intensely angry and forceful, with sharp attack, strong emphasis and no gentle breathiness',
-    (_FishEmotionFamily.cold, TtsEmotionIntensity.vivid) => 'cold, restrained and emotionally distant, with flat pitch and clipped phrasing',
-    (_FishEmotionFamily.cold, TtsEmotionIntensity.dramatic) => 'ice-cold and contemptuous, with very flat pitch, terse phrasing and deliberate pauses',
+      'clearly $emotion, sharp and direct, with firm emphasis and clipped rhythm',
+    (_FishEmotionFamily.angry, TtsEmotionIntensity.dramatic) =>
+      'intensely $emotion, with sustained tension, deliberate emphasis and clipped phrasing',
+    (_FishEmotionFamily.cold, TtsEmotionIntensity.vivid) =>
+      'clearly $emotion, emotionally distant, with flat pitch and clipped phrasing',
+    (_FishEmotionFamily.cold, TtsEmotionIntensity.dramatic) =>
+      'deeply $emotion, with very flat pitch, terse phrasing and deliberate pauses',
     (_FishEmotionFamily.sarcastic, TtsEmotionIntensity.vivid) =>
-      'dryly sarcastic, pointed and dismissive, with clipped ironic emphasis',
-    (_FishEmotionFamily.sarcastic, TtsEmotionIntensity.dramatic) => 'sharply sarcastic and cutting, with deliberate ironic emphasis and a hard finish',
+      'clearly $emotion, with dry delivery and clipped ironic emphasis',
+    (_FishEmotionFamily.sarcastic, TtsEmotionIntensity.dramatic) =>
+      'intensely $emotion, with deliberate ironic emphasis and a pointed finish',
     (_FishEmotionFamily.calm, TtsEmotionIntensity.vivid) =>
-      'warmly $emotion, with clear gentle pitch movement and deliberate phrasing',
+      'clearly $emotion, with gentle pitch movement and deliberate phrasing',
     (_FishEmotionFamily.calm, TtsEmotionIntensity.dramatic) =>
       'deeply $emotion and immersive, with pronounced gentle prosody, warm emphasis and deliberate pauses',
     (_, TtsEmotionIntensity.vivid) =>
-      'clearly $emotion, expressive and animated, with noticeable pitch and rhythm changes',
+      'clearly $emotion, with expressive phrasing and continuous emotional tone',
     (_, TtsEmotionIntensity.dramatic) =>
-      'intensely $emotion and highly animated, with strong pitch changes, emphatic stress and dynamic rhythm',
+      'intensely $emotion, with sustained emotional expression and deliberate emphasis',
     _ => emotion,
   };
 }
 
 enum _FishEmotionFamily {
   happy,
+  gentlePositive,
   curious,
   excited,
   confident,
   surprised,
   worried,
+  melancholy,
   empathetic,
   angry,
   cold,
@@ -434,14 +579,19 @@ class CharacterPerformanceCue {
   const CharacterPerformanceCue({
     this.expression,
     this.action,
+    this.actions = const [],
+    this.motionGroupIds = const [],
     this.actionCueCount = 0,
   });
 
   final CharacterExpression? expression;
   final CharacterAction? action;
+  final List<CharacterAction> actions;
+  final List<String> motionGroupIds;
   final int actionCueCount;
 
-  bool get isEmpty => expression == null && action == null;
+  bool get isEmpty =>
+      expression == null && action == null && motionGroupIds.isEmpty;
 }
 
 class RyzaPerformanceSegment {
@@ -449,11 +599,15 @@ class RyzaPerformanceSegment {
     required this.speechText,
     this.expression,
     this.action,
+    this.actions = const [],
+    this.motionGroupIds = const [],
   });
 
   final String speechText;
   final CharacterExpression? expression;
   final CharacterAction? action;
+  final List<CharacterAction> actions;
+  final List<String> motionGroupIds;
 }
 
 List<RyzaPerformanceSegment> performanceSegmentsForAssistantResponse(
@@ -465,14 +619,22 @@ List<RyzaPerformanceSegment> performanceSegmentsForAssistantResponse(
     if (segment.speaker != ChatSpeaker.ryza) continue;
     CharacterExpression? expression;
     CharacterAction? action;
+    final actions = <CharacterAction>[];
+    final motionGroupIds = <String>[];
     final faceMatches = _faceCue.allMatches(segment.text);
     for (final match in faceMatches) {
       expression = characterExpressionFromTag(match.group(1) ?? '');
     }
     final actionMatches = _actionCue.allMatches(segment.text);
     for (final match in actionMatches) {
-      final parsed = characterActionFromTag(match.group(1) ?? '');
-      if (parsed != CharacterAction.none) action = parsed;
+      final raw = match.group(1) ?? '';
+      final motionGroupId = characterMotionGroupIdFromTag(raw);
+      if (motionGroupId != null) {
+        motionGroupIds.add(motionGroupId);
+        continue;
+      }
+      action = characterActionFromTag(raw);
+      if (action != CharacterAction.none) actions.add(action);
     }
     final speechText = ensureFishEmotionCue(segment.text, fallbackMood);
     if (speechText.isEmpty) continue;
@@ -481,6 +643,8 @@ List<RyzaPerformanceSegment> performanceSegmentsForAssistantResponse(
         speechText: speechText,
         expression: expression,
         action: action,
+        actions: actions,
+        motionGroupIds: motionGroupIds,
       ),
     );
   }
@@ -490,6 +654,8 @@ List<RyzaPerformanceSegment> performanceSegmentsForAssistantResponse(
 CharacterPerformanceCue performanceCueForAssistantResponse(String response) {
   CharacterExpression? expression;
   CharacterAction? action;
+  final actions = <CharacterAction>[];
+  final motionGroupIds = <String>[];
   var actionCueCount = 0;
   for (final segment in parseAssistantSegments(response)) {
     if (segment.speaker != ChatSpeaker.ryza) continue;
@@ -498,13 +664,23 @@ CharacterPerformanceCue performanceCueForAssistantResponse(String response) {
     }
     for (final match in _actionCue.allMatches(segment.text)) {
       actionCueCount += 1;
-      final parsed = characterActionFromTag(match.group(1) ?? '');
-      if (parsed != CharacterAction.none) action = parsed;
+      // Explicit none must supersede the previous line's action; otherwise its
+      // increased cue count replays that old action while streaming.
+      final raw = match.group(1) ?? '';
+      final motionGroupId = characterMotionGroupIdFromTag(raw);
+      if (motionGroupId != null) {
+        motionGroupIds.add(motionGroupId);
+        continue;
+      }
+      action = characterActionFromTag(raw);
+      if (action != CharacterAction.none) actions.add(action);
     }
   }
   return CharacterPerformanceCue(
     expression: expression,
     action: action,
+    actions: actions,
+    motionGroupIds: motionGroupIds,
     actionCueCount: actionCueCount,
   );
 }

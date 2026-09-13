@@ -84,45 +84,44 @@ class _AppShellState extends State<AppShell> {
             worldMapVisible: _destination == AppDestination.worldMap,
           );
         });
-        final content = _destination == AppDestination.settings
-            ? Stack(
-                children: [
-                  ChatScreen(
-                    controller: widget.controller,
-                    onMenuPressed: _openMenu,
-                    hideUi: _chatUiHidden,
-                  ),
-                  SettingsScreen(
-                    controller: widget.controller,
-                    onMenuPressed: _openMenu,
-                  ),
-                ],
-              )
-            : IndexedStack(
-                index: _destination.index,
-                children: [
-                  ChatScreen(
-                    controller: widget.controller,
-                    onMenuPressed: _openMenu,
-                    hideUi: _chatUiHidden,
-                  ),
-                  WorldMapScreen(
-                    controller: widget.controller,
-                    onMenuPressed: _openMenu,
-                    onClose: () => _selectDestination(AppDestination.chat),
-                  ),
-                  AlarmScreen(
-                    controller: widget.controller,
-                    onMenuPressed: _openMenu,
-                  ),
-                  const SizedBox.shrink(),
-                  RuntimeLogScreen(
-                    language: widget.controller.interfaceLanguage,
-                    liquidGlass: widget.controller.liquidGlassChatUi,
-                    onMenuPressed: _openMenu,
-                  ),
-                ],
-              );
+        // Keep the chat element at the same tree location: replacing its
+        // parent on settings navigation disposes playback, replay files and drafts.
+        final content = Stack(
+          children: [
+            IndexedStack(
+              index: _destination == AppDestination.settings
+                  ? AppDestination.chat.index
+                  : _destination.index,
+              children: [
+                ChatScreen(
+                  controller: widget.controller,
+                  onMenuPressed: _openMenu,
+                  hideUi: _chatUiHidden,
+                ),
+                WorldMapScreen(
+                  controller: widget.controller,
+                  onMenuPressed: _openMenu,
+                  onClose: () => _selectDestination(AppDestination.chat),
+                ),
+                AlarmScreen(
+                  controller: widget.controller,
+                  onMenuPressed: _openMenu,
+                ),
+                const SizedBox.shrink(),
+                RuntimeLogScreen(
+                  language: widget.controller.interfaceLanguage,
+                  liquidGlass: widget.controller.liquidGlassChatUi,
+                  onMenuPressed: _openMenu,
+                ),
+              ],
+            ),
+            if (_destination == AppDestination.settings)
+              SettingsScreen(
+                controller: widget.controller,
+                onMenuPressed: _openMenu,
+              ),
+          ],
+        );
         final safeTop = MediaQuery.paddingOf(context).top;
         return Scaffold(
           key: _scaffoldKey,
@@ -194,153 +193,6 @@ class _AppShellState extends State<AppShell> {
                 ),
               ),
           ],
-        ),
-      ),
-    );
-  }
-}
-
-class _AppDrawer extends StatelessWidget {
-  const _AppDrawer({
-    required this.selected,
-    required this.stars,
-    required this.language,
-    required this.liquidGlass,
-    required this.onSelected,
-  });
-
-  final AppDestination selected;
-  final int stars;
-  final AppLanguage language;
-  final bool liquidGlass;
-  final ValueChanged<AppDestination> onSelected;
-
-  @override
-  Widget build(BuildContext context) {
-    return Drawer(
-      width: MediaQuery.sizeOf(context).width.clamp(280, 360).toDouble(),
-      backgroundColor: Colors.transparent,
-      surfaceTintColor: Colors.transparent,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.horizontal(right: Radius.circular(22)),
-      ),
-      child: GlassSurface(
-        liquidGlass: liquidGlass,
-        tone: GlassTone.light,
-        borderRadius: const BorderRadius.horizontal(right: Radius.circular(22)),
-        fallbackColor: const Color(0xF2F4F7F4),
-        child: SafeArea(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(24, 24, 16, 18),
-                child: Row(
-                  children: [
-                    const CircleAvatar(
-                      radius: 25,
-                      backgroundImage: AssetImage(
-                        'assets/images/chara_icons/ryza.png',
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text(
-                            'AgentAtelierR',
-                            style: TextStyle(
-                              color: Color(0xFF24302E),
-                              fontSize: 18,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                          Text(
-                            language.text('本地原型', 'Local prototype', 'ローカル版'),
-                            style: TextStyle(color: Color(0xA624302E)),
-                          ),
-                        ],
-                      ),
-                    ),
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 9,
-                        vertical: 5,
-                      ),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.52),
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(color: Colors.white24),
-                      ),
-                      child: Row(
-                        children: [
-                          const Icon(
-                            Icons.star_rounded,
-                            size: 17,
-                            color: Color(0xFFFFD66B),
-                          ),
-                          const SizedBox(width: 3),
-                          Text(
-                            '$stars',
-                            style: const TextStyle(color: Color(0xFF24302E)),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const Divider(height: 1, color: Color(0x2424302E)),
-              const SizedBox(height: 8),
-              Expanded(
-                child: ListView(
-                  padding: const EdgeInsets.symmetric(horizontal: 12),
-                  children: [
-                    for (final destination in AppDestination.values)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 4),
-                        child: ListTile(
-                          selected: destination == selected,
-                          selectedTileColor: Colors.white.withValues(
-                            alpha: 0.52,
-                          ),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(18),
-                            side: destination == selected
-                                ? const BorderSide(color: Color(0x2424302E))
-                                : BorderSide.none,
-                          ),
-                          leading: Icon(
-                            destination.icon,
-                            color: const Color(0xFF334542),
-                          ),
-                          title: Text(
-                            destination.label(language),
-                            style: const TextStyle(color: Color(0xFF24302E)),
-                          ),
-                          onTap: () => onSelected(destination),
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(24, 16, 24, 20),
-                child: Text(
-                  language.text(
-                    'AI 与语音服务可在设置中配置',
-                    'Configure AI and voice services in Settings',
-                    'AIと音声サービスは設定から変更できます',
-                  ),
-                  style: const TextStyle(
-                    color: Color(0xA624302E),
-                    fontSize: 12,
-                  ),
-                ),
-              ),
-            ],
-          ),
         ),
       ),
     );

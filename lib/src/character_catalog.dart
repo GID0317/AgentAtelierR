@@ -152,6 +152,31 @@ class CharacterCatalog {
   }
 
   CharacterProfile? profile(String id) => _profiles[id];
+  String lookupPrompt(String query) {
+    final q = query.trim().toLowerCase();
+    if (q.length < 2) return '请提供具体角色名或 ID。';
+    final matches = _profiles.values.where(
+      (p) => [
+        p.id,
+        p.names.chinese,
+        p.names.english,
+        p.names.japanese,
+      ].any((n) => n.toLowerCase().contains(q)),
+    );
+    return jsonEncode({
+      'characters': matches
+          .take(2)
+          .map(
+            (p) => {
+              'id': p.id,
+              'name': p.names.chinese,
+              'setting': p.encounterPrompt,
+            },
+          )
+          .toList(),
+      'note': '查询不代表人物已在场。',
+    });
+  }
 
   String displayName(String id, AppLanguage language) =>
       _profiles[id]?.names.forLanguage(language) ?? id;
@@ -231,6 +256,30 @@ ${profile.encounterPrompt}''';
 
 候选角色扮演摘要：
 $profiles''';
+  }
+
+  String buildCompactEncounterPrompt(String stageId, String context) {
+    final candidates = encountersFor(stageId);
+    final selected = candidates
+        .where((item) {
+          final p = item.profile;
+          return context.contains('角色[${p.id}]') ||
+              [p.names.chinese, p.names.english, p.names.japanese]
+                  .where((name) => name.isNotEmpty)
+                  .any(
+                    (name) =>
+                        context.toLowerCase().contains(name.toLowerCase()),
+                  );
+        })
+        .take(2)
+        .toList();
+    final names = candidates
+        .map((e) => '${e.profile.id}=${e.profile.names.chinese}')
+        .join('、');
+    if (selected.isEmpty) {
+      return '附近可能遇见（不代表在场）：$names。尚无被提及或参与对话的 NPC；本轮保持莱莎回应，可提出与候选人见面，未注入设定前不要代其发言。';
+    }
+    return '仅以下当前话题涉及的 NPC 可发言，不因提及就假定在场，需符合叙事：\n${selected.map((e) => 'ID:${e.profile.id} ${e.profile.names.chinese}/${e.profile.names.english}/${e.profile.names.japanese}\n${e.profile.encounterPrompt}').join('\n')}';
   }
 
   static String _fieldIdOf(String value) {

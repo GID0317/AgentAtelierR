@@ -8,16 +8,19 @@ import 'package:flutter/services.dart';
 import 'ai_services.dart';
 import 'app_controller.dart';
 import 'app_localization.dart';
+import 'character_prompt_editor.dart';
 import 'chat_segments.dart';
 import 'runtime_log.dart';
 import 'platform_slider.dart';
 import 'glass_ui.dart';
+import 'mimo_tts_settings.dart';
 
 String _activeTtsModel(AppController controller) =>
     switch (controller.ttsProvider) {
       TtsProvider.fishAudio => controller.fishAudioModel,
       TtsProvider.dashScope => controller.dashScopeTtsModel,
       TtsProvider.generic => controller.genericTtsModel,
+      TtsProvider.mimo => controller.mimoTts.model,
     };
 
 class SettingsScreen extends StatelessWidget {
@@ -330,6 +333,116 @@ class SettingsScreen extends StatelessWidget {
                   : null,
             ),
             SwitchListTile(
+              value: controller.llmContextCompatibility,
+              onChanged: controller.setLlmContextCompatibility,
+              secondary: const Icon(Icons.compress_rounded),
+              title: Text(
+                language.text(
+                  'LLM长上下文兼容模式',
+                  'Compact LLM context',
+                  'LLMコンテキスト互換モード',
+                ),
+              ),
+              subtitle: Text(
+                language.text(
+                  '精简扮演规则；仅注入最近对话涉及的当前地图 NPC，强化语言与输出格式。',
+                  'Compact rules, relevant local NPCs only, explicit language constraints.',
+                  'ルールを簡潔にし、会話に関係する現地NPCのみ追加します。',
+                ),
+              ),
+            ),
+            SwitchListTile(
+              value: controller.characterPersonaInjectionEnabled,
+              onChanged: controller.setCharacterPersonaInjectionEnabled,
+              secondary: const Icon(Icons.person_outline_rounded),
+              title: Text(
+                language.text(
+                  '人物设定注入',
+                  'Character profile injection',
+                  'キャラクター設定の注入',
+                ),
+              ),
+              subtitle: Text(
+                language.text(
+                  '向 LLM 发送莱莎的详细人物设定；关闭后仍保留最小身份和输出协议',
+                  'Send Ryza\'s detailed profile; core identity and output rules remain when disabled',
+                  'ライザの詳細設定を送信します。無効でも最小限の身元と出力規則は維持されます',
+                ),
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.edit_note_rounded),
+              title: Text(
+                language.text(
+                  '编辑人物设定',
+                  'Edit character profile',
+                  'キャラクター設定を編集',
+                ),
+              ),
+              subtitle: Text(
+                controller.characterPersona.isEmpty
+                    ? language.text(
+                        '当前使用默认设定',
+                        'Using the default profile',
+                        'デフォルト設定を使用中',
+                      )
+                    : language.text(
+                        '当前使用自定义设定',
+                        'Using a custom profile',
+                        'カスタム設定を使用中',
+                      ),
+              ),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => CharacterPromptEditor(controller: controller),
+                ),
+              ),
+            ),
+            SwitchListTile(
+              value: controller.worldSettingInjectionEnabled,
+              onChanged: controller.setWorldSettingInjectionEnabled,
+              secondary: const Icon(Icons.menu_book_outlined),
+              title: Text(
+                language.text('世界书注入', 'World book injection', 'ワールドブックの注入'),
+              ),
+              subtitle: Text(
+                language.text(
+                  '向 LLM 发送世界背景；关闭可减少上下文长度',
+                  'Send world background to the LLM; disable it to reduce context size',
+                  '世界背景をLLMへ送信します。無効にするとコンテキストを短縮できます',
+                ),
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.edit_document),
+              title: Text(
+                language.text('编辑世界书', 'Edit world book', 'ワールドブックを編集'),
+              ),
+              subtitle: Text(
+                controller.worldSetting.isEmpty
+                    ? language.text(
+                        '当前使用默认设定',
+                        'Using the default setting',
+                        'デフォルト設定を使用中',
+                      )
+                    : language.text(
+                        '当前使用自定义设定',
+                        'Using a custom setting',
+                        'カスタム設定を使用中',
+                      ),
+              ),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => CharacterPromptEditor(
+                    controller: controller,
+                    world: true,
+                  ),
+                ),
+              ),
+            ),
+            SwitchListTile(
               value: controller.agentEnabled,
               onChanged: controller.aiEnabled
                   ? controller.setAgentEnabled
@@ -338,7 +451,7 @@ class SettingsScreen extends StatelessWidget {
               title: Text(language.text('联网 Agent', 'Web agent', 'ウェブエージェント')),
               subtitle: Text(
                 language.text(
-                  '允许模型调用只读网页搜索工具，最多执行两轮',
+                  '按需查询人物、记忆和联网工具；每次请求累计最多执行 10 次工具调用',
                   'Allow up to two rounds of read-only web search',
                   '読み取り専用ウェブ検索を最大2回許可',
                 ),
@@ -740,7 +853,7 @@ class SettingsScreen extends StatelessWidget {
                   keyboardType: TextInputType.url,
                   decoration: const InputDecoration(
                     labelText: 'Base URL',
-                    hintText: 'https://generativelanguage.googleapis.com/v1beta/openai',
+                    hintText: 'https://generativelanguage.googleapis.com/v1beta/interactions',
                     border: OutlineInputBorder(),
                   ),
                 ),
@@ -765,7 +878,7 @@ class SettingsScreen extends StatelessWidget {
                 ),
                 const SizedBox(height: 8),
                 Text(
-                  '使用 Gemini 官方 OpenAI 兼容 /chat/completions 接口。Key 仅保存在系统安全存储，不会进入本地备份。',
+                  '使用 Gemini 官方 Interactions 接口。可填写完整 /interactions 地址或 /v1beta 基础地址，旧 /openai 地址会自动适配。Key 仅保存在系统安全存储，不会进入本地备份。',
                   style: TextStyle(
                     color: Theme.of(context).colorScheme.onSurfaceVariant,
                     fontSize: 12,
@@ -924,6 +1037,7 @@ class SettingsScreen extends StatelessWidget {
                   TtsProvider.fishAudio => 'Fish Audio S2 Pro 与声音模型 ID',
                   TtsProvider.dashScope => '百炼 Qwen3-TTS 系统音色与指令控制',
                   TtsProvider.generic => '兼容 OpenAI /audio/speech 的自定义服务',
+                  TtsProvider.mimo => 'MiMo V2.5 参考音频克隆、预置音色与音色设计',
                 }),
                 onTap: () => Navigator.pop(context, value),
               ),
@@ -940,6 +1054,11 @@ class SettingsScreen extends StatelessWidget {
         await _showDashScopeSettings(context);
       case TtsProvider.generic:
         await _showGenericTtsSettings(context);
+      case TtsProvider.mimo:
+        await showDialog<void>(
+          context: context,
+          builder: (_) => MimoTtsSettingsDialog(controller: controller),
+        );
     }
   }
 
@@ -1175,6 +1294,7 @@ class SettingsScreen extends StatelessWidget {
                               ),
                               emotionIntensity,
                               density: cueDensity,
+                              asmr: controller.asmrModeEnabled,
                             ),
                             model: model,
                             format: format,

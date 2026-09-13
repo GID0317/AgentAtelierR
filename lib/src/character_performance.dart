@@ -10,6 +10,7 @@ enum CharacterAction {
   surprised,
   comfort,
   playful,
+  invite,
 }
 
 CharacterAction characterActionFromTag(String value) {
@@ -18,6 +19,15 @@ CharacterAction characterActionFromTag(String value) {
     (action) => action.name == normalized,
     orElse: () => CharacterAction.none,
   );
+}
+
+/// Returns a normalized resource-group token when the model selected an
+/// exact action from the runtime capability catalog. These tokens are only
+/// accepted after the caller verifies that the group is loaded and compatible
+/// with the current pose; they are not inferred from user wording.
+String? characterMotionGroupIdFromTag(String value) {
+  final normalized = value.trim().toLowerCase();
+  return RegExp(r'^grp_[a-z0-9_]+$').hasMatch(normalized) ? normalized : null;
 }
 
 class CharacterActionPlan {
@@ -61,6 +71,9 @@ const _seatedActionPlans = <CharacterAction, CharacterActionPlan>{
   ),
   CharacterAction.comfort: CharacterActionPlan(motionGroupIds: ['grp_fg_031']),
   CharacterAction.playful: CharacterActionPlan(motionGroupIds: ['grp_fg_016']),
+  // Use the authored welcoming gesture; the face tag supplies the
+  // expectation/softness while this track opens the upper body toward the user.
+  CharacterAction.invite: CharacterActionPlan(motionGroupIds: ['grp_fg_031']),
 };
 
 const _standingActionPlans = <CharacterAction, CharacterActionPlan>{
@@ -98,6 +111,7 @@ const _standingActionPlans = <CharacterAction, CharacterActionPlan>{
   CharacterAction.playful: CharacterActionPlan(
     motionGroupIds: ['grp_fg_g_006', 'grp_fg_g_009'],
   ),
+  CharacterAction.invite: CharacterActionPlan(motionGroupIds: ['grp_fg_g_007']),
 };
 
 CharacterActionPlan characterActionPlan(

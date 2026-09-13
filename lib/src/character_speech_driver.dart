@@ -30,6 +30,12 @@ class CharacterPerformanceProfile {
   final Map<String, String> aimBones;
   final Map<String, String> rollBones;
 
+  bool get hasResourceDrivers => drivers.isNotEmpty;
+
+  /// No bone mappings are guessed when a resource lacks legacy DriverDefs.
+  factory CharacterPerformanceProfile.fallback() =>
+      CharacterPerformanceProfile._(const [], const {}, const {});
+
   factory CharacterPerformanceProfile.parse(String source) {
     final json = jsonDecode(source) as Map<String, dynamic>;
     final gesture = json['emotionalGesture'] as Map<String, dynamic>?;
@@ -71,10 +77,32 @@ class CharacterPerformanceDirector {
   double _elapsed = 0;
   double _transition = 1;
   double _hold = 1;
-  RigMotion _from = const RigMotion();
-  RigMotion _target = const RigMotion();
-  RigMotion _current = const RigMotion();
+  double _strength = 0.3;
+  Map<String, RigMotion> _from = {};
+  Map<String, RigMotion> _target = {};
+  final Map<String, double> _followerDelays = {};
   final Map<String, RigMotion> _parts = {};
+
+  // Unsupported resource schemas use small, slow targets with actual rests,
+  // never an extra oscillator layered over the resource's existing motion.
+  static const _fallbackDriver = <String, dynamic>{
+    'id': 'neutral_n_fallback',
+    'driver': 'head',
+    'yawMin': -0.08,
+    'yawMax': 0.08,
+    'pitchMin': -0.06,
+    'pitchMax': 0.08,
+    'rollMin': -0.035,
+    'rollMax': 0.035,
+    'transitionMin': 1.4,
+    'transitionMax': 2.2,
+    'holdMin': 2.8,
+    'holdMax': 4.5,
+    'followers': [
+      {'part': 'eye', 'scale': 0.4, 'delay': 0.15},
+      {'part': 'body', 'scale': 0.2, 'delay': 0.55},
+    ],
+  };
 
   double _number(Map value, String key, double fallback) {
     final number = value[key];
@@ -100,7 +128,7 @@ class CharacterPerformanceDirector {
     required double energy,
     bool suppressed = false,
   }) {
-    final dt = delta.clamp(0.0, 0.05).toDouble();
+    final dt = delta.isFinite ? delta.clamp(0.0, 0.05).toDouble() : 0.0;
     if (_driver == null ||
         _emotion != emotion ||
         _elapsed >= _transition + _hold) {
@@ -114,49 +142,80 @@ class CharacterPerformanceDirector {
       }
       final alternatives = candidates.where((d) => d != _driver).toList();
       if (alternatives.isNotEmpty) candidates = alternatives;
-      if (candidates.isNotEmpty) {
-        _driver = candidates[_random.nextInt(candidates.length)];
-        _from = _current;
-        _target = RigMotion(
-          _range(_driver!, 'yaw', 0, -1, 1),
-          _range(_driver!, 'pitch', 0, -1, 1),
-          _range(_driver!, 'roll', 0, -1, 1),
+      _driver = candidates.isEmpty
+          ? _fallbackDriver
+          : candidates[_random.nextInt(candidates.length)];
+      // A new lead part starts at its own current pose. Reusing one shared
+      // head target here used to transfer it abruptly to the body or eyes.
+      _from = Map.of(_parts);
+      final motion = RigMotion(
+        _range(_driver!, 'yaw', 0, -1, 1),
+        _range(_driver!, 'pitch', 0, -1, 1),
+        _range(_driver!, 'roll', 0, -1, 1),
+      );
+      _target = {(_driver!['driver'] as String? ?? 'head'): motion};
+      _followerDelays.clear();
+      for (final follower in _driver!['followers'] as List? ?? const []) {
+        if (follower is! Map || follower['part'] is! String) continue;
+        final part = follower['part'] as String;
+        if (_target.containsKey(part)) continue;
+        _target[part] = motion.scaled(
+          _number(follower, 'scale', 0).clamp(-1.0, 1.0),
         );
-        _transition = _range(_driver!, 'transition', 1, 0.4, 4);
-        _hold = _range(_driver!, 'hold', 1.5, 0.2, 5);
+        _followerDelays[part] = _number(
+          follower,
+          'delay',
+          0.3,
+        ).clamp(0.06, 1.0);
       }
+      _transition = _range(_driver!, 'transition', 1, 0.4, 4);
+      _hold = _range(_driver!, 'hold', 1.5, 0.2, 5);
       _emotion = emotion;
       _elapsed = 0;
     }
     _elapsed += dt;
     final t = (_elapsed / _transition).clamp(0.0, 1.0);
-    _current = _from.blend(_target, t * t * (3 - 2 * t));
-    final strength = suppressed
+    final eased = t * t * (3 - 2 * t);
+    // Idle motion should read as a living character's breathing and attention,
+    // rather than a continuously animated puppet. Keep a visible but bounded
+    // baseline so the character does not become a statue between interactions.
+    final targetStrength = suppressed
         ? 0.0
         : speaking
-        ? 0.65 + energy * 0.35
-        : 0.3;
-    final desired = <String, RigMotion>{
-      (_driver?['driver'] as String? ?? 'head'): _current.scaled(strength),
-    };
-    final delays = <String, double>{};
-    for (final follower in _driver?['followers'] as List? ?? const []) {
-      if (follower is! Map || follower['part'] is! String) continue;
-      final part = follower['part'] as String;
-      if (desired.containsKey(part)) continue;
-      desired[part] = _current.scaled(
-        strength * _number(follower, 'scale', 0).clamp(-1.0, 1.0),
+        ? 0.85
+        : 0.30;
+    // Mouth energy includes syllable-rate pulses, especially the Android
+    // fallback envelope. It must not shake the head/body. Keep the argument
+    // for callers that still use that same energy for lip sync, and ease only
+    // the broad speaking state (350 ms attack, 500 ms release, 120 ms hide).
+    final strengthResponse = suppressed
+        ? 0.12
+        : speaking
+        ? 0.35
+        : 0.9;
+    _strength +=
+        (targetStrength - _strength) * (1 - exp(-dt / strengthResponse));
+    for (final part in {
+      'head',
+      'body',
+      'eye',
+      ..._parts.keys,
+      ..._target.keys,
+    }) {
+      final desired = (_from[part] ?? const RigMotion()).blend(
+        _target[part] ?? const RigMotion(),
+        eased,
       );
-      delays[part] = _number(follower, 'delay', 0.3).clamp(0.06, 1.0);
-    }
-    for (final part in {'head', 'body', 'eye', ..._parts.keys}) {
-      final response = suppressed ? 0.08 : delays[part] ?? 0.12;
+      final response = _followerDelays[part] ?? 0.12;
       _parts[part] = (_parts[part] ?? const RigMotion()).blend(
-        desired[part] ?? const RigMotion(),
+        desired,
         1 - exp(-dt / response),
       );
     }
-    return Map.unmodifiable(_parts);
+    return Map.unmodifiable({
+      for (final entry in _parts.entries)
+        entry.key: entry.value.scaled(_strength),
+    });
   }
 }
 
