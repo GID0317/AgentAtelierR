@@ -4,7 +4,7 @@
 
 AgentAtelierR 是一个以 **Android 为主要开发平台**的 Flutter AI 角色陪伴实验项目，同时提供 Windows 本地构建路径。它将 LLM 对话、Spine 角色动画、语音合成、地图场景和本地记忆结合起来，探索更有连续感的角色互动体验。
 
-项目早期名为 **Ryza Chat**，现已更名为 **AgentAtelierR**，仓库也已从 `LLMAtelier-` 迁移至 `AgentAtelierR`；Dart 包名 `ryza_chat_mvp` 保留历史命名。现有角色设定以莱莎为参考，属于非官方实验项目，不代表原作官方产品或剧情。
+**AgentAtelierR**，仓库也已从 `LLMAtelier-` 迁移至 `AgentAtelierR`；Dart 包名 `ryza_chat_mvp` 保留历史命名。现有角色设定以莱莎为参考，属于非官方实验项目，不代表原作官方产品或剧情。
 
 > **本仓库提供代码和实现方式，不提供原版游戏资源包。** 克隆代码不等于获得完整的角色体验。模型、纹理、地图、音频和动作映射需要自行准备具有相应使用权的资源，具体文件和目录见[资源接入与构建指南](docs/RESOURCE_SETUP_AND_BUILD.md)。
 
