@@ -8,6 +8,7 @@ import 'package:path_provider/path_provider.dart';
 
 import 'ai_services.dart';
 import 'app_controller.dart';
+import 'settings_detail_page.dart';
 import 'app_localization.dart';
 import 'mimo_tts_client.dart';
 import 'mimo_tts_config.dart';
@@ -241,9 +242,9 @@ class _MimoTtsSettingsDialogState extends State<MimoTtsSettingsDialog> {
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
-    return AlertDialog(
+    return SettingsDetailPage(
+      controller: widget.controller,
       title: const Text('MiMo TTS'),
-      insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
       content: SizedBox(
         width: 440,
         child: SingleChildScrollView(

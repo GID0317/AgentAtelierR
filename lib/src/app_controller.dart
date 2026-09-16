@@ -6,11 +6,20 @@ import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'app_localization.dart';
+import 'app_theme.dart';
+import 'alchemy_models.dart';
+import 'attachment_thumbnail_store.dart';
 import 'character_catalog.dart';
 import 'character_appearance.dart';
 import 'mimo_tts_config.dart';
 import 'character_prompt_defaults.dart';
+import 'frame_rate_controller.dart';
+import 'quest_models.dart';
+import 'runtime_log.dart';
+import 'settings_slots.dart';
+import 'openai_configuration_slots.dart';
 import 'world_prompt_defaults.dart';
+import 'world_travel_catalog.dart';
 
 enum SceneTime { morning, afternoon, evening, night }
 
@@ -182,26 +191,61 @@ class ChatAttachment {
     required this.mimeType,
     required this.size,
     this.bytes,
+    this.thumbnailBytes,
+    this.thumbnailKey,
   });
 
   factory ChatAttachment.fromJson(Map<String, dynamic> json) => ChatAttachment(
     name: json['name'] as String? ?? '附件',
     mimeType: json['mimeType'] as String? ?? 'application/octet-stream',
     size: json['size'] as int? ?? 0,
+    thumbnailBytes: _decodeThumbnail(json['thumbnailBase64']),
+    thumbnailKey: json['thumbnailKey'] as String?,
   );
 
   final String name;
   final String mimeType;
   final int size;
   final Uint8List? bytes;
+  final Uint8List? thumbnailBytes;
+  final String? thumbnailKey;
 
   bool get isImage => mimeType.startsWith('image/');
+  Uint8List? get previewBytes => thumbnailBytes ?? bytes;
 
-  Map<String, dynamic> toJson() => {
+  static Uint8List? _decodeThumbnail(Object? value) {
+    if (value is! String || value.length > 3 * 1024 * 1024) return null;
+    try {
+      final decoded = base64Decode(value);
+      return decoded.length <= 2 * 1024 * 1024 ? decoded : null;
+    } on FormatException {
+      return null;
+    }
+  }
+
+  Map<String, dynamic> toJson({bool includeThumbnailBytes = false}) => {
     'name': name,
     'mimeType': mimeType,
     'size': size,
+    if (thumbnailKey != null) 'thumbnailKey': thumbnailKey,
+    if (includeThumbnailBytes && thumbnailBytes != null)
+      'thumbnailBase64': base64Encode(thumbnailBytes!),
   };
+
+  ChatAttachment copyWith({
+    Uint8List? thumbnailBytes,
+    String? thumbnailKey,
+    bool replaceThumbnailKey = false,
+  }) => ChatAttachment(
+    name: name,
+    mimeType: mimeType,
+    size: size,
+    bytes: bytes,
+    thumbnailBytes: thumbnailBytes ?? this.thumbnailBytes,
+    thumbnailKey: replaceThumbnailKey
+        ? thumbnailKey
+        : thumbnailKey ?? this.thumbnailKey,
+  );
 }
 
 class ChatMessage {
@@ -224,20 +268,25 @@ class ChatMessage {
   final bool isUser;
   final List<ChatAttachment> attachments;
 
-  Map<String, dynamic> toJson() => {
+  Map<String, dynamic> toJson({bool includeAttachmentThumbnails = false}) => {
     'text': text,
     'isUser': isUser,
     if (attachments.isNotEmpty)
       'attachments': attachments
-          .map((attachment) => attachment.toJson())
+          .map(
+            (attachment) => attachment.toJson(
+              includeThumbnailBytes: includeAttachmentThumbnails,
+            ),
+          )
           .toList(),
   };
 
-  ChatMessage copyWith({String? text}) => ChatMessage(
-    text: text ?? this.text,
-    isUser: isUser,
-    attachments: attachments,
-  );
+  ChatMessage copyWith({String? text, List<ChatAttachment>? attachments}) =>
+      ChatMessage(
+        text: text ?? this.text,
+        isUser: isUser,
+        attachments: attachments ?? this.attachments,
+      );
 }
 
 class LocalSaveSlot {
@@ -392,10 +441,17 @@ class AppController extends ChangeNotifier {
   // Editable prompt fields are user data, not additional system instructions.
   // Keep them bounded so a pasted document cannot consume the whole context.
 
-  AppController._(this._preferences, this.characterCatalog);
+  AppController._(
+    this._preferences,
+    this.characterCatalog,
+    this.worldTravelCatalog,
+  );
+
+  final WorldTravelCatalog worldTravelCatalog;
 
   static const suggestionLimit = 3;
   static const suggestionWindow = Duration(minutes: 10);
+  static const maxActiveDynamicQuests = 6;
   static const _memoryEntryLimit = 40;
   static const _memoryCharacterLimit = 6000;
   static const _protectedMemoryCategories = <String>{
@@ -456,6 +512,12 @@ class AppController extends ChangeNotifier {
 
   final SharedPreferences _preferences;
   final CharacterCatalog characterCatalog;
+  final AdaptiveFrameRateController frameRate = AdaptiveFrameRateController();
+  bool _saveInProgress = false;
+  bool _saveAgain = false;
+  int _dataRevision = 0;
+
+  int get dataRevision => _dataRevision;
 
   List<ChatMessage> messages = [_initialMessage];
   SceneTime sceneTime = sceneTimeForNow();
@@ -466,6 +528,42 @@ class AppController extends ChangeNotifier {
   LlmProvider llmProvider = LlmProvider.openAiCompatible;
   String openAiBaseUrl = 'https://api.openai.com/v1';
   String openAiModel = 'gpt-4.1-mini';
+  OpenAiConfigurationSlots _openAiConfigurations = OpenAiConfigurationSlots();
+  int get activeOpenAiSlot => _openAiConfigurations.active;
+  OpenAiConfigurationSlots get openAiConfigurations {
+    final copy = _openAiConfigurations.copy();
+    copy.entries[copy.active] = {
+      'baseUrl': openAiBaseUrl,
+      'model': openAiModel,
+    };
+    return copy;
+  }
+
+  void _restoreOpenAiConfigurations(Object? value) {
+    _openAiConfigurations = OpenAiConfigurationSlots.fromJson(value);
+    final selected = _openAiConfigurations.entries[activeOpenAiSlot];
+    if (selected != null) {
+      openAiBaseUrl = selected['baseUrl']!;
+      openAiModel = selected['model']!;
+    }
+  }
+
+  void saveOpenAiConfigurations(
+    OpenAiConfigurationSlots slots, {
+    required bool enabled,
+  }) {
+    OpenAiConfigurationSlots.checkIndex(slots.active);
+    final copy = slots.copy();
+    final selected = copy.entries[copy.active];
+    if (selected == null) throw ArgumentError('Selected OpenAI slot is empty');
+    _openAiConfigurations = copy;
+    configureAi(
+      enabled: enabled,
+      baseUrl: selected['baseUrl']!,
+      model: selected['model']!,
+    );
+  }
+
   String geminiBaseUrl =
       'https://generativelanguage.googleapis.com/v1beta/interactions';
   String geminiModel = 'gemini-3.8-flash';
@@ -478,6 +576,70 @@ class AppController extends ChangeNotifier {
   bool worldSettingInjectionEnabled = true;
   String characterPersona = '';
   String worldSetting = '';
+  final Map<SettingsSlotKind, SettingsSlots> _settingsSlots = {};
+
+  Map<String, String> get _userProfileSlotData => {
+    'address': userAddress,
+    'portrait': userPortrait,
+    'relationshipRole': userRelationshipRole.name,
+    'interactionStyle': userInteractionStyle.name,
+    'relationshipCustom': userRelationshipCustom,
+    'interactionCustom': userInteractionCustom,
+    'boundaries': userInteractionBoundaries,
+  };
+
+  SettingsSlots settingsSlots(SettingsSlotKind kind) {
+    final slots = (_settingsSlots[kind] ?? SettingsSlots()).copy();
+    slots.entries[slots.active] = switch (kind) {
+      SettingsSlotKind.user => _userProfileSlotData,
+      SettingsSlotKind.character => {'text': characterPersona},
+      SettingsSlotKind.world => {'text': worldSetting},
+    };
+    return slots;
+  }
+
+  Map<String, dynamic> get _settingsSlotsJson => {
+    for (final kind in SettingsSlotKind.values)
+      kind.name: settingsSlots(kind).toJson(),
+  };
+
+  void _restoreSettingsSlots(Object? data) {
+    for (final kind in SettingsSlotKind.values) {
+      _settingsSlots[kind] = SettingsSlots.fromJson(
+        data is Map ? data[kind.name] : null,
+      );
+    }
+  }
+
+  void saveSettingsSlots(SettingsSlotKind kind, SettingsSlots draft) {
+    RangeError.checkValidIndex(draft.active, draft.entries, 'active');
+    final slots = draft.copy();
+    final selected = slots.entries[slots.active] ?? <String, String>{};
+    _settingsSlots[kind] = slots;
+    switch (kind) {
+      case SettingsSlotKind.user:
+        configureUserProfile(
+          address: selected['address'] ?? '',
+          portrait: selected['portrait'] ?? '',
+          relationshipRole: UserRelationshipRole.values.firstWhere(
+            (v) => v.name == selected['relationshipRole'],
+            orElse: () => UserRelationshipRole.familiarPartner,
+          ),
+          interactionStyle: UserInteractionStyle.values.firstWhere(
+            (v) => v.name == selected['interactionStyle'],
+            orElse: () => UserInteractionStyle.balanced,
+          ),
+          boundaries: selected['boundaries'] ?? '',
+          relationshipCustom: selected['relationshipCustom'] ?? '',
+          interactionCustom: selected['interactionCustom'] ?? '',
+        );
+      case SettingsSlotKind.character:
+        setCharacterPersona(selected['text'] ?? '');
+      case SettingsSlotKind.world:
+        setWorldSetting(selected['text'] ?? '');
+    }
+  }
+
   String get editableWorldSetting =>
       worldSetting.isEmpty ? defaultWorldSetting : worldSetting;
   void setWorldSetting(String value) {
@@ -547,7 +709,9 @@ class AppController extends ChangeNotifier {
   bool liquidGlassChatUi = false;
   bool gazeTrackingEnabled = true;
   bool showMicrophoneButton = false;
+  AppFrameRateMode frameRateMode = AppFrameRateMode.adaptive;
   AppThemePreference themePreference = AppThemePreference.system;
+  AppAccentTheme accentTheme = AppAccentTheme.jade;
   AppLanguage interfaceLanguage = AppLanguage.chinese;
   AppLanguage narratorLanguage = AppLanguage.chinese;
   AppLanguage characterReplyLanguage = AppLanguage.chinese;
@@ -562,14 +726,34 @@ class AppController extends ChangeNotifier {
   int mapVisitCount = 0;
   int travelCount = 0;
   int sceneChangeCount = 0;
+  int gatherCount = 0;
+  int synthesisCount = 0;
+  int storyQuestIndex = 0;
+  int storyQuestBaseline = 0;
   int stars = 0;
   Set<String> claimedMissionIds = <String>{};
+  List<DynamicQuest> dynamicQuests = <DynamicQuest>[];
+  AlchemyState alchemyState = AlchemyState.empty();
+  bool _gatheringSceneReady = false;
+
+  bool get gatheringSceneReady => _gatheringSceneReady;
 
   static Future<AppController> load() async {
     final preferences = await SharedPreferences.getInstance();
-    final characterCatalog = await CharacterCatalog.load();
-    final controller = AppController._(preferences, characterCatalog);
+    final catalogs = await Future.wait<Object>([
+      CharacterCatalog.load(),
+      WorldTravelCatalog.load(),
+    ]);
+    final characterCatalog = catalogs[0] as CharacterCatalog;
+    final worldTravelCatalog = catalogs[1] as WorldTravelCatalog;
+    final controller = AppController._(
+      preferences,
+      characterCatalog,
+      worldTravelCatalog,
+    );
     controller._restore();
+    controller.frameRate.setMode(controller.frameRateMode, force: true);
+    await controller._hydrateMessageAttachments();
     return controller;
   }
 
@@ -582,6 +766,16 @@ class AppController extends ChangeNotifier {
   }
 
   void _restore() {
+    final rawAlchemy = _preferences.getString('alchemy_save_v1');
+    if (rawAlchemy != null) {
+      try {
+        alchemyState = AlchemyState.fromJson(
+          Map<String, dynamic>.from(jsonDecode(rawAlchemy) as Map),
+        );
+      } on Object {
+        alchemyState = AlchemyState.empty();
+      }
+    }
     final rawMessages = _preferences.getString('chat_messages');
     if (rawMessages != null) {
       try {
@@ -616,6 +810,14 @@ class AppController extends ChangeNotifier {
     );
     openAiBaseUrl = _preferences.getString('openai_base_url') ?? openAiBaseUrl;
     openAiModel = _preferences.getString('openai_model') ?? openAiModel;
+    final savedOpenAiSlots = _preferences.getString('openai_configurations_v1');
+    if (savedOpenAiSlots != null) {
+      try {
+        _restoreOpenAiConfigurations(jsonDecode(savedOpenAiSlots));
+      } on FormatException {
+        // Keep the legacy active configuration if local slot data is damaged.
+      }
+    }
     geminiBaseUrl = _preferences.getString('gemini_base_url') ?? geminiBaseUrl;
     geminiModel = _preferences.getString('gemini_model') ?? geminiModel;
     openAiAdvancedEnabled =
@@ -656,6 +858,8 @@ class AppController extends ChangeNotifier {
     if (!hasMigratedFishModel) {
       unawaited(_preferences.setBool('fish_audio_s2_pro_migrated', true));
     }
+    fishAudioBaseUrl =
+        _preferences.getString('fish_audio_base_url') ?? fishAudioBaseUrl;
     fishAudioReferenceId =
         _preferences.getString('fish_audio_reference_id') ?? '';
     fishAudioAsmrReferenceId =
@@ -730,8 +934,19 @@ class AppController extends ChangeNotifier {
       (value) => value.name == _preferences.getString('user_interaction_style'),
       orElse: () => UserInteractionStyle.balanced,
     );
+    userRelationshipCustom =
+        _preferences.getString('user_relationship_custom') ?? '';
+    userInteractionCustom =
+        _preferences.getString('user_interaction_custom') ?? '';
     userInteractionBoundaries =
         _preferences.getString('user_interaction_boundaries') ?? '';
+    try {
+      _restoreSettingsSlots(
+        jsonDecode(_preferences.getString('settings_slots_v1') ?? '{}'),
+      );
+    } on FormatException {
+      _restoreSettingsSlots(null);
+    }
     final moodIndex = _preferences.getInt('character_mood') ?? 0;
     characterMood = CharacterMood
         .values[moodIndex.clamp(0, CharacterMood.values.length - 1)];
@@ -744,9 +959,17 @@ class AppController extends ChangeNotifier {
     gazeTrackingEnabled = _preferences.getBool('gaze_tracking_enabled') ?? true;
     showMicrophoneButton =
         _preferences.getBool('show_microphone_button') ?? false;
+    frameRateMode = AppFrameRateMode.values.firstWhere(
+      (value) => value.name == _preferences.getString('frame_rate_mode'),
+      orElse: () => AppFrameRateMode.adaptive,
+    );
     themePreference = AppThemePreference.values.firstWhere(
       (value) => value.name == _preferences.getString('theme_preference'),
       orElse: () => AppThemePreference.system,
+    );
+    accentTheme = AppAccentTheme.values.firstWhere(
+      (v) => v.name == _preferences.getString('accent_theme'),
+      orElse: () => AppAccentTheme.jade,
     );
     interfaceLanguage = AppLanguage.values.firstWhere(
       (value) => value.name == _preferences.getString('interface_language'),
@@ -780,9 +1003,51 @@ class AppController extends ChangeNotifier {
     mapVisitCount = _preferences.getInt('map_visit_count') ?? 0;
     travelCount = _preferences.getInt('travel_count') ?? 0;
     sceneChangeCount = _preferences.getInt('scene_change_count') ?? 0;
+    gatherCount = _preferences.getInt('gather_count') ?? 0;
+    synthesisCount =
+        _preferences.getInt('synthesis_count') ?? alchemyState.history.length;
+    storyQuestIndex = (_preferences.getInt('story_quest_index') ?? 0).clamp(
+      0,
+      builtInStoryQuests.length,
+    );
+    final storyInitialized =
+        _preferences.getBool('story_quest_initialized') ?? false;
+    if (storyInitialized) {
+      storyQuestBaseline = _preferences.getInt('story_quest_baseline') ?? 0;
+    } else {
+      storyQuestBaseline = storyQuestIndex < builtInStoryQuests.length
+          ? _questCounter(builtInStoryQuests[storyQuestIndex].objectiveType)
+          : 0;
+      unawaited(_preferences.setBool('story_quest_initialized', true));
+      unawaited(_preferences.setInt('story_quest_index', storyQuestIndex));
+      unawaited(
+        _preferences.setInt('story_quest_baseline', storyQuestBaseline),
+      );
+    }
     stars = _preferences.getInt('stars') ?? 0;
     claimedMissionIds =
         (_preferences.getStringList('claimed_missions') ?? <String>[]).toSet();
+    final rawDynamicQuests = _preferences.getString('dynamic_quests');
+    if (rawDynamicQuests != null) {
+      try {
+        dynamicQuests = _parseDynamicQuests(jsonDecode(rawDynamicQuests));
+      } on Object {
+        dynamicQuests = <DynamicQuest>[];
+      }
+    }
+  }
+
+  List<DynamicQuest> _parseDynamicQuests(Object? raw) {
+    if (raw == null) return <DynamicQuest>[];
+    if (raw is! List) throw const FormatException('任务列表格式无效');
+    final quests = <DynamicQuest>[];
+    final ids = <String>{};
+    for (final entry in raw.take(50)) {
+      if (entry is! Map) throw const FormatException('任务数据格式无效');
+      final quest = DynamicQuest.fromJson(Map<String, dynamic>.from(entry));
+      if (ids.add(quest.id)) quests.add(quest);
+    }
+    return quests;
   }
 
   void addUserMessage(
@@ -885,6 +1150,39 @@ class AppController extends ChangeNotifier {
     return result.reversed.toList(growable: false);
   }
 
+  String _alchemyPromptFor(String currentInput) {
+    final topic = [
+      ...recentMessages(limit: 2).map((message) => message.text),
+      currentInput,
+    ].join('\n');
+    if (!RegExp(
+      r'炼金|调合|合成|制作|配方|素材|采集|采到|收集|摘|挖|捡|背包|库存|道具|物品|海胆|中和剂|alchemy|synthesi[sz]e|craft|recipe|ingredient|gather|collect|inventory|item|錬金|調合|合成|レシピ|素材|採取|収集|拾|バッグ|在庫|アイテム|うに|中和剤',
+      caseSensitive: false,
+    ).hasMatch(topic)) {
+      return '';
+    }
+    if (agentEnabled) {
+      return '本地炼金规则：当前地点=$selectedAreaName / $selectedStageName，'
+          '采集场景=${_gatheringSceneReady ? '已进入' : '未进入'}。地图切换只表示抵达，不会自动获得素材；'
+          '确定采集时，先根据当前地点和对话判断本次发现的 1 至 3 种合理素材，再随 gather_current_location 的 discoveries 提交；'
+          '素材不受内置清单限制，但数量与品质由本地系统决定。准备调合时先调用 inspect_alchemy_inventory，'
+          '再由莱莎从返回的真实实例 ID 中选材并调用 synthesize_custom_item。'
+          '采集物和成品的名称、描述、分类与调合结果叙述必须使用当前界面语言 ${interfaceLanguage.promptLabel}；'
+          '不要跟随莱莎回复语言或历史消息的语言。'
+          '应用没有固定配方清单；每次都要根据用户需求、当前场景和素材性质自行决定成品名称、用途、分类、效果与选材。'
+          '可以还原作品中的幻想道具，也可以创作游戏外用途的幻想炼金成品；工具失败或库存不足时不得宣称成功。';
+    }
+    final inventory = alchemyState.inventory.reversed
+        .take(12)
+        .map((item) {
+          return '${item.displayNameFor(interfaceLanguage)}×${item.quantity}(品质${item.qualityRank}${item.quality})';
+        })
+        .join('、');
+    return '本地炼金状态：库存=${inventory.isEmpty ? '空' : inventory}；'
+        '调合记录=${alchemyState.history.length}。素材只能通过地图采集获得；'
+        'Agent 未开启，对话不能修改库存；消耗、品质、标签和调合结果只能由本地炼金系统修改。';
+  }
+
   String buildCharacterPrompt({
     String currentInput = '',
     CharacterPerformancePromptContext? performanceContext,
@@ -894,6 +1192,7 @@ class AppController extends ChangeNotifier {
     );
     final now = DateTime.now();
     final currentDate = _dateOnly(now);
+    final alchemyPrompt = _alchemyPromptFor(currentInput);
     final userProfile = jsonEncode({
       '称呼': userAddress,
       '自画像': userPortrait.trim().isEmpty ? '未设置' : userPortrait.trim(),
@@ -1006,6 +1305,7 @@ ${worldSettingInjectionEnabled ? '世界书：${jsonEncode(compactWorld)}' : '�
 用户资料：$userProfile
 服装：${appearance.label}；${appearance.promptDescription}；仅在换装或话题相关时主动提及。
 地点：$selectedAreaName / $selectedStageName；本地日期：$currentDate
+${alchemyPrompt.isEmpty ? '' : alchemyPrompt}
 $compactNpc
 ${candidates.isNotEmpty ? npcInteractionFrequency.promptInstruction : ''}
 ${longTermMemoryEnabled ? (agentEnabled ? '需要过往事件或偏好时调用 search_memory，未返回的内容不要编造。' : compactMemory) : ''}
@@ -1065,6 +1365,8 @@ ${worldSettingInjectionEnabled ? '世界书：${_promptDataBlock('world', editab
 情绪参考：${characterMood.label}；这是背景参考，不是强制本轮表情或语音指令，以当前语义为准。
 服装：${appearance.label}。${appearance.promptDescription}；仅在换装或话题相关时主动提及。
 本地日期：$currentDate；位置：$selectedAreaName / $selectedStageId / $selectedStageName。运行时能力以本轮快照为准。
+${_storyQuestPrompt()}
+${alchemyPrompt.isEmpty ? '' : alchemyPrompt}
 $npc
 ${candidates.isNotEmpty ? npcInteractionFrequency.promptInstruction : ''}
 ${longTermMemoryEnabled ? (agentEnabled ? '需要回忆过往事件、约定或用户偏好时调用 search_memory；没有返回的记忆不要编造。' : _promptDataBlock('memory', memory)) : ''}
@@ -1076,14 +1378,295 @@ ${longTermMemoryEnabled ? (agentEnabled ? '需要回忆过往事件、约定或�
   }
 
   String queryContextTool(String name, Map<String, dynamic> args) {
-    final query = (args['query'] as String? ?? '').trim();
     if (!agentEnabled) return 'Agent 已关闭。';
-    if (query.isEmpty || query.length > 300) return 'query 需要 1 至 300 字符。';
-    if (name == 'lookup_character') return characterCatalog.lookupPrompt(query);
+    if (name == 'inspect_quests') {
+      return _inspectQuestsToolResult();
+    }
+    if (name == 'create_quest') {
+      return _createQuestToolResult(args);
+    }
+    if (name == 'inspect_alchemy_inventory') {
+      return _alchemyInventoryToolResult();
+    }
+    if (name == 'gather_current_location') {
+      return _gatherCurrentLocationToolResult(args);
+    }
+    if (name == 'inspect_map_locations') {
+      return _inspectMapLocationsToolResult(args);
+    }
+    if (name == 'travel_to_stage') {
+      return _travelToStageToolResult(args);
+    }
+    if (name == 'synthesize_custom_item') {
+      return _synthesizeToolResult(args);
+    }
+    final query = (args['query'] as String? ?? '').trim();
+    if (query.isEmpty || query.length > 300) {
+      return 'query 需要 1 至 300 字符。';
+    }
+    if (name == 'lookup_character') {
+      return characterCatalog.lookupPrompt(query);
+    }
     if (name == 'search_memory') {
       return memoryPromptForCurrentConversation(currentInput: query);
     }
     return '未知工具。';
+  }
+
+  int _questCounter(QuestObjectiveType objectiveType) =>
+      switch (objectiveType) {
+        QuestObjectiveType.gather => gatherCount,
+        QuestObjectiveType.synthesize => synthesisCount,
+        QuestObjectiveType.travel => travelCount,
+        QuestObjectiveType.chat => userMessageCount,
+      };
+
+  StoryQuestDefinition? get currentStoryQuest =>
+      storyQuestIndex >= builtInStoryQuests.length
+      ? null
+      : builtInStoryQuests[storyQuestIndex];
+
+  int storyQuestProgress(StoryQuestDefinition quest) {
+    final index = builtInStoryQuests.indexWhere((item) => item.id == quest.id);
+    if (index < 0 || index > storyQuestIndex) return 0;
+    if (index < storyQuestIndex) return quest.target;
+    return (_questCounter(quest.objectiveType) - storyQuestBaseline).clamp(
+      0,
+      quest.target,
+    );
+  }
+
+  bool isStoryQuestComplete(StoryQuestDefinition quest) =>
+      storyQuestProgress(quest) >= quest.target;
+
+  bool claimStoryQuest(String id) {
+    final quest = currentStoryQuest;
+    if (quest == null || quest.id != id || !isStoryQuestComplete(quest)) {
+      return false;
+    }
+    stars += quest.reward;
+    storyQuestIndex += 1;
+    final next = currentStoryQuest;
+    storyQuestBaseline = next == null ? 0 : _questCounter(next.objectiveType);
+    _changed();
+    return true;
+  }
+
+  String _storyQuestPrompt() {
+    final quest = currentStoryQuest;
+    if (quest == null) return '内置主线：20/20 已完成。';
+    return '当前内置主线 ${storyQuestIndex + 1}/20：'
+        '${quest.title(interfaceLanguage)}；${quest.description(interfaceLanguage)}；'
+        '进度 ${storyQuestProgress(quest)}/${quest.target}。只在相关话题中自然提及，不要伪造进度或完成状态。';
+  }
+
+  int questProgress(DynamicQuest quest) =>
+      quest.progressFor(_questCounter(quest.objectiveType));
+
+  bool isDynamicQuestComplete(DynamicQuest quest) =>
+      quest.isCompleteFor(_questCounter(quest.objectiveType));
+
+  DynamicQuest createDynamicQuest({
+    required String title,
+    required String description,
+    required QuestObjectiveType objectiveType,
+    required int target,
+    DateTime? now,
+  }) {
+    final normalizedTitle = title.replaceAll(RegExp(r'[\r\n]+'), ' ').trim();
+    final normalizedDescription = description
+        .replaceAll(RegExp(r'[\r\n]+'), ' ')
+        .trim();
+    if (normalizedTitle.isEmpty || normalizedTitle.length > 48) {
+      throw const FormatException('任务名称需要 1 至 48 字符');
+    }
+    if (normalizedDescription.isEmpty || normalizedDescription.length > 240) {
+      throw const FormatException('任务描述需要 1 至 240 字符');
+    }
+    if (target < 1 || target > 10) {
+      throw const FormatException('任务目标次数需要在 1 至 10 之间');
+    }
+    final activeQuests = dynamicQuests.where((quest) => !quest.isClaimed);
+    if (activeQuests.length >= maxActiveDynamicQuests) {
+      throw StateError('最多同时保留 $maxActiveDynamicQuests 个未领取任务');
+    }
+    final normalizedKey = normalizedTitle.toLowerCase();
+    if (activeQuests.any(
+      (quest) => quest.title.trim().toLowerCase() == normalizedKey,
+    )) {
+      throw const FormatException('已经有同名的未领取任务');
+    }
+    final createdAt = now ?? DateTime.now();
+    final quest = DynamicQuest(
+      id: 'quest_${createdAt.microsecondsSinceEpoch}_${dynamicQuests.length}',
+      title: normalizedTitle,
+      description: normalizedDescription,
+      objectiveType: objectiveType,
+      target: target,
+      progressBaseline: _questCounter(objectiveType),
+      reward: objectiveType.rewardFor(target),
+      createdAt: createdAt,
+      language: interfaceLanguage,
+    );
+    dynamicQuests = [quest, ...dynamicQuests].take(50).toList(growable: false);
+    _changed();
+    return quest;
+  }
+
+  bool claimDynamicQuest(String id) {
+    final index = dynamicQuests.indexWhere((quest) => quest.id == id);
+    if (index < 0) return false;
+    final quest = dynamicQuests[index];
+    if (quest.isClaimed || !isDynamicQuestComplete(quest)) return false;
+    final updated = quest.copyWith(claimedAt: DateTime.now());
+    dynamicQuests = [...dynamicQuests]..[index] = updated;
+    stars += quest.reward;
+    _changed();
+    return true;
+  }
+
+  bool removeDynamicQuest(String id) {
+    final updated = dynamicQuests.where((quest) => quest.id != id).toList();
+    if (updated.length == dynamicQuests.length) return false;
+    dynamicQuests = updated;
+    _changed();
+    return true;
+  }
+
+  Map<String, dynamic> _dynamicQuestToolJson(DynamicQuest quest) => {
+    'id': quest.id,
+    'title': quest.title,
+    'description': quest.description,
+    'objective_type': quest.objectiveType.name,
+    'objective_label': quest.objectiveType.label(interfaceLanguage),
+    'progress': questProgress(quest),
+    'target': quest.target,
+    'reward_stars': quest.reward,
+    'status': quest.isClaimed
+        ? 'claimed'
+        : isDynamicQuestComplete(quest)
+        ? 'claimable'
+        : 'active',
+    'created_at': quest.createdAt.toIso8601String(),
+  };
+
+  Map<String, dynamic> _storyQuestToolJson(StoryQuestDefinition quest) {
+    final index = builtInStoryQuests.indexOf(quest);
+    return {
+      'id': quest.id,
+      'chapter': index + 1,
+      'title': quest.title(interfaceLanguage),
+      'description': quest.description(interfaceLanguage),
+      'objective_type': quest.objectiveType.name,
+      'objective_label': quest.objectiveType.label(interfaceLanguage),
+      'progress': storyQuestProgress(quest),
+      'target': quest.target,
+      'reward_stars': quest.reward,
+      'status': index < storyQuestIndex
+          ? 'claimed'
+          : index > storyQuestIndex
+          ? 'locked'
+          : isStoryQuestComplete(quest)
+          ? 'claimable'
+          : 'active',
+    };
+  }
+
+  String _inspectQuestsToolResult() => jsonEncode({
+    'ok': true,
+    'main_story': {
+      'completed': storyQuestIndex,
+      'total': builtInStoryQuests.length,
+      'current': currentStoryQuest == null
+          ? null
+          : _storyQuestToolJson(currentStoryQuest!),
+    },
+    'active_limit': maxActiveDynamicQuests,
+    'unclaimed_count': dynamicQuests.where((quest) => !quest.isClaimed).length,
+    'quests': dynamicQuests.map(_dynamicQuestToolJson).toList(),
+    'message': '已读取内置主线和莱莎委托。',
+  });
+
+  String _createQuestToolResult(Map<String, dynamic> args) {
+    final authorization = args['authorization'] as String? ?? '';
+    if ((authorization != 'user_requested' &&
+            authorization != 'user_accepted') ||
+        !_isQuestCreationAuthorized(authorization)) {
+      return jsonEncode({
+        'ok': false,
+        'error': 'authorization_required',
+        'message': '只有用户主动要求任务，或明确接受莱莎提出的任务后才能创建。',
+      });
+    }
+    try {
+      final objectiveName = args['objective_type'] as String? ?? '';
+      final objectiveType = QuestObjectiveType.values.firstWhere(
+        (value) => value.name == objectiveName,
+        orElse: () => throw const FormatException('任务目标类型无效'),
+      );
+      final rawTarget = args['target'];
+      if (rawTarget is! num || rawTarget != rawTarget.round()) {
+        throw const FormatException('任务目标次数必须是整数');
+      }
+      final quest = createDynamicQuest(
+        title: args['title'] as String? ?? '',
+        description: args['description'] as String? ?? '',
+        objectiveType: objectiveType,
+        target: rawTarget.round(),
+      );
+      return jsonEncode({
+        'ok': true,
+        'quest': _dynamicQuestToolJson(quest),
+        'message': '任务已写入本地任务列表；不要再重复创建。',
+      });
+    } on Object catch (error) {
+      return jsonEncode({
+        'ok': false,
+        'error': 'quest_creation_failed',
+        'message': error is FormatException
+            ? error.message
+            : error is StateError
+            ? error.message
+            : error.toString(),
+      });
+    }
+  }
+
+  bool _isQuestCreationAuthorized(String authorization) {
+    final lastUserIndex = messages.lastIndexWhere((message) => message.isUser);
+    if (lastUserIndex < 0) return false;
+    final userText = messages[lastUserIndex].text.toLowerCase();
+    if (RegExp(
+      r'(不要|不想|拒绝|取消|别).{0,12}(任务|委托|quest|クエスト)|\b(no|not|don.t)\b.{0,20}\bquest\b',
+      caseSensitive: false,
+    ).hasMatch(userText)) {
+      return false;
+    }
+    final mentionsQuest = RegExp(
+      r'任务|委托|委託|クエスト|\bquest\b',
+      caseSensitive: false,
+    ).hasMatch(userText);
+    final requestsCreation = RegExp(
+      r'给我|来一个|想一个|安排|创建|新增|接受|接取|领取|make|create|give|accept|add|作って|考えて|受ける|受注',
+      caseSensitive: false,
+    ).hasMatch(userText);
+    if (authorization == 'user_requested') {
+      return mentionsQuest && requestsCreation;
+    }
+    final acceptsProposal = RegExp(
+      r'^(好|好的|可以|行|就这个|接受|接了|没问题|yes|ok|okay|sure|accept|いいよ|はい|受ける)[！!。,.，\s]*$',
+      caseSensitive: false,
+    ).hasMatch(userText.trim());
+    if (!acceptsProposal) return false;
+    final priorMessages = messages.take(lastUserIndex).toList();
+    final previousAssistant = priorMessages.lastIndexWhere(
+      (message) => !message.isUser,
+    );
+    if (previousAssistant < 0) return false;
+    return RegExp(
+      r'任务|委托|委託|クエスト|\bquest\b',
+      caseSensitive: false,
+    ).hasMatch(priorMessages[previousAssistant].text);
   }
 
   String buildUserReplySuggestionPrompt() =>
@@ -1644,12 +2227,21 @@ ${longTermMemoryEnabled ? (agentEnabled ? '需要回忆过往事件、约定或�
     _changed();
   }
 
-  Map<String, dynamic> exportData() => {
+  Map<String, dynamic> exportData({
+    bool includeAttachmentThumbnails = false,
+  }) => {
     'format': 'agent-atelier-r-local-backup',
     'version': 1,
     'exportedAt': DateTime.now().toIso8601String(),
-    'messages': messages.map((message) => message.toJson()).toList(),
+    'messages': messages
+        .map(
+          (message) => message.toJson(
+            includeAttachmentThumbnails: includeAttachmentThumbnails,
+          ),
+        )
+        .toList(),
     'memorySummary': memorySummary,
+    'settingsSlots': _settingsSlotsJson,
     'userProfile': {
       'address': userAddress,
       'portrait': userPortrait,
@@ -1671,7 +2263,9 @@ ${longTermMemoryEnabled ? (agentEnabled ? '需要回忆过往事件、约定或�
     'ambientVolume': ambientVolume,
     'liquidGlassChatUi': liquidGlassChatUi,
     'showMicrophoneButton': showMicrophoneButton,
+    'frameRateMode': frameRateMode.name,
     'themePreference': themePreference.name,
+    'accentTheme': accentTheme.name,
     'interfaceLanguage': interfaceLanguage.name,
     'narratorLanguage': narratorLanguage.name,
     'characterReplyLanguage': characterReplyLanguage.name,
@@ -1687,14 +2281,21 @@ ${longTermMemoryEnabled ? (agentEnabled ? '需要回忆过往事件、约定或�
       'mapVisitCount': mapVisitCount,
       'travelCount': travelCount,
       'sceneChangeCount': sceneChangeCount,
+      'gatherCount': gatherCount,
+      'synthesisCount': synthesisCount,
+      'storyQuestIndex': storyQuestIndex,
+      'storyQuestBaseline': storyQuestBaseline,
       'stars': stars,
       'claimedMissionIds': claimedMissionIds.toList(),
     },
+    'dynamicQuests': dynamicQuests.map((quest) => quest.toJson()).toList(),
+    'alchemy': alchemyState.toJson(),
     'preferences': {
       'aiEnabled': aiEnabled,
       'llmProvider': llmProvider.name,
       'openAiBaseUrl': openAiBaseUrl,
       'openAiModel': openAiModel,
+      'openAiConfigurations': openAiConfigurations.toJson(),
       'geminiBaseUrl': geminiBaseUrl,
       'geminiModel': geminiModel,
       'openAiAdvancedEnabled': openAiAdvancedEnabled,
@@ -1735,6 +2336,37 @@ ${longTermMemoryEnabled ? (agentEnabled ? '需要回忆过往事件、约定或�
       'ttsPreviewText': ttsPreviewText,
       'longTermMemoryEnabled': longTermMemoryEnabled,
     },
+  };
+
+  Map<String, dynamic> _exportGameState() => {
+    'format': 'agent-atelier-r-game-save',
+    'version': 1,
+    'messages': messages.map((message) => message.toJson()).toList(),
+    'memorySummary': memorySummary,
+    'characterMood': characterMood.name,
+    'relationshipPoints': relationshipPoints,
+    'sceneTime': sceneTime.name,
+    'automaticSceneTime': automaticSceneTime,
+    'selectedAreaId': selectedAreaId,
+    'selectedStageId': selectedStageId,
+    'selectedAreaName': selectedAreaName,
+    'selectedStageName': selectedStageName,
+    'selectedCharacterAppearanceId': selectedCharacterAppearanceId,
+    'progress': {
+      'characterTouchCount': characterTouchCount,
+      'userMessageCount': userMessageCount,
+      'mapVisitCount': mapVisitCount,
+      'travelCount': travelCount,
+      'sceneChangeCount': sceneChangeCount,
+      'gatherCount': gatherCount,
+      'synthesisCount': synthesisCount,
+      'storyQuestIndex': storyQuestIndex,
+      'storyQuestBaseline': storyQuestBaseline,
+      'stars': stars,
+      'claimedMissionIds': claimedMissionIds.toList(),
+    },
+    'dynamicQuests': dynamicQuests.map((quest) => quest.toJson()).toList(),
+    'alchemy': alchemyState.toJson(),
   };
 
   static const localSaveSlotCount = 6;
@@ -1781,16 +2413,17 @@ ${longTermMemoryEnabled ? (agentEnabled ? '需要回忆过往事件、约定或�
       'location': '$selectedAreaName / $selectedStageName',
       'messageCount': messages.length,
       'preview': preview.length > 80 ? '${preview.substring(0, 80)}…' : preview,
-      'snapshot': exportData(),
+      'snapshot': _exportGameState(),
     };
-    await _preferences.setString(
+    final saved = await _preferences.setString(
       '$_localSaveSlotPrefix$index',
       jsonEncode(data),
     );
+    if (!saved) throw StateError('存档写入失败');
     notifyListeners();
   }
 
-  void loadFromLocalSlot(int index) {
+  Future<void> loadFromLocalSlot(int index) async {
     if (index < 0 || index >= localSaveSlotCount) {
       throw RangeError.range(index, 0, localSaveSlotCount - 1, 'index');
     }
@@ -1802,18 +2435,134 @@ ${longTermMemoryEnabled ? (agentEnabled ? '需要回忆过往事件、约定或�
         data['snapshot'] is! Map<String, dynamic>) {
       throw const FormatException('存档格式无效');
     }
-    importData(data['snapshot'] as Map<String, dynamic>);
+    await _importGameState(data['snapshot'] as Map<String, dynamic>);
   }
 
   Future<void> deleteLocalSlot(int index) async {
     if (index < 0 || index >= localSaveSlotCount) {
       throw RangeError.range(index, 0, localSaveSlotCount - 1, 'index');
     }
-    await _preferences.remove('$_localSaveSlotPrefix$index');
+    final removed = await _preferences.remove('$_localSaveSlotPrefix$index');
+    if (!removed) throw StateError('存档删除失败');
     notifyListeners();
   }
 
-  void importData(Map<String, dynamic> data) {
+  Future<void> importData(Map<String, dynamic> data) async {
+    // Parse and hydrate in an isolated controller first. A malformed import
+    // must never leave the live conversation half-replaced.
+    final candidate = AppController._(
+      _preferences,
+      characterCatalog,
+      worldTravelCatalog,
+    );
+    candidate._applyImportedData(exportData());
+    candidate._applyImportedData(data);
+    await candidate._hydrateMessageAttachments();
+
+    // Notify listeners before replacing state so active streams and audio can
+    // stop synchronously instead of writing into the incoming conversation.
+    _dataRevision += 1;
+    notifyListeners();
+    _applyImportedData(data);
+    frameRate.setMode(frameRateMode, force: true);
+    messages = candidate.messages;
+    _changed();
+  }
+
+  Future<void> _importGameState(Map<String, dynamic> data) async {
+    final candidate = AppController._(
+      _preferences,
+      characterCatalog,
+      worldTravelCatalog,
+    );
+    candidate._applyImportedData(exportData());
+    candidate._applyGameState(data);
+    await candidate._hydrateMessageAttachments();
+
+    _dataRevision += 1;
+    notifyListeners();
+    _applyGameState(data);
+    messages = candidate.messages;
+    _changed();
+  }
+
+  void _applyGameState(Map<String, dynamic> data) {
+    const supportedFormats = {
+      'agent-atelier-r-game-save',
+      'agent-atelier-r-local-backup',
+      'ryza-chat-local-backup',
+    };
+    if (!supportedFormats.contains(data['format']) || data['version'] != 1) {
+      throw const FormatException('存档快照格式无效');
+    }
+    final importedMessages = (data['messages'] as List<dynamic>? ?? [])
+        .whereType<Map<String, dynamic>>()
+        .map(ChatMessage.fromJson)
+        .where(
+          (message) =>
+              message.text.isNotEmpty || message.attachments.isNotEmpty,
+        )
+        .toList();
+    if (importedMessages.isNotEmpty) {
+      messages = importedMessages.length <= 60
+          ? importedMessages
+          : importedMessages.sublist(importedMessages.length - 60);
+    }
+    memorySummary = data['memorySummary'] as String? ?? memorySummary;
+    characterMood = CharacterMood.values.firstWhere(
+      (mood) => mood.name == data['characterMood'],
+      orElse: () => characterMood,
+    );
+    relationshipPoints =
+        data['relationshipPoints'] as int? ?? relationshipPoints;
+    automaticSceneTime =
+        data['automaticSceneTime'] as bool? ?? automaticSceneTime;
+    sceneTime = SceneTime.values.firstWhere(
+      (value) => value.name == data['sceneTime'],
+      orElse: () => sceneTime,
+    );
+    selectedAreaId = data['selectedAreaId'] as String? ?? selectedAreaId;
+    selectedStageId = data['selectedStageId'] as String? ?? selectedStageId;
+    selectedAreaName = data['selectedAreaName'] as String? ?? selectedAreaName;
+    selectedStageName =
+        data['selectedStageName'] as String? ?? selectedStageName;
+    selectedCharacterAppearanceId =
+        data['selectedCharacterAppearanceId'] as String? ??
+        selectedCharacterAppearanceId;
+    final progress = data['progress'] as Map<String, dynamic>? ?? const {};
+    characterTouchCount =
+        progress['characterTouchCount'] as int? ?? characterTouchCount;
+    userMessageCount = progress['userMessageCount'] as int? ?? userMessageCount;
+    mapVisitCount = progress['mapVisitCount'] as int? ?? mapVisitCount;
+    travelCount = progress['travelCount'] as int? ?? travelCount;
+    sceneChangeCount = progress['sceneChangeCount'] as int? ?? sceneChangeCount;
+    gatherCount = progress['gatherCount'] as int? ?? 0;
+    synthesisCount = progress['synthesisCount'] as int? ?? 0;
+    storyQuestIndex = (progress['storyQuestIndex'] as int? ?? 0).clamp(
+      0,
+      builtInStoryQuests.length,
+    );
+    storyQuestBaseline =
+        progress['storyQuestBaseline'] as int? ??
+        (storyQuestIndex < builtInStoryQuests.length
+            ? _questCounter(builtInStoryQuests[storyQuestIndex].objectiveType)
+            : 0);
+    stars = progress['stars'] as int? ?? stars;
+    if (progress['claimedMissionIds'] is List<dynamic>) {
+      claimedMissionIds = (progress['claimedMissionIds'] as List<dynamic>)
+          .whereType<String>()
+          .toSet();
+    }
+    if (data['alchemy'] case final Map<dynamic, dynamic> alchemy) {
+      alchemyState = AlchemyState.fromJson(Map<String, dynamic>.from(alchemy));
+    }
+    if (!progress.containsKey('synthesisCount')) {
+      synthesisCount = alchemyState.history.length;
+    }
+    dynamicQuests = _parseDynamicQuests(data['dynamicQuests']);
+  }
+
+  void _applyImportedData(Map<String, dynamic> data) {
     const supportedFormats = {
       'agent-atelier-r-local-backup',
       'ryza-chat-local-backup',
@@ -1830,7 +2579,9 @@ ${longTermMemoryEnabled ? (agentEnabled ? '需要回忆过往事件、约定或�
         )
         .toList();
     if (importedMessages.isNotEmpty) {
-      messages = importedMessages.take(60).toList();
+      messages = importedMessages.length <= 60
+          ? importedMessages
+          : importedMessages.sublist(importedMessages.length - 60);
     }
     memorySummary = data['memorySummary'] as String? ?? '';
     final userProfile = data['userProfile'] as Map<String, dynamic>? ?? {};
@@ -1865,9 +2616,17 @@ ${longTermMemoryEnabled ? (agentEnabled ? '需要回忆过往事件、约定或�
     ambientVolume = (data['ambientVolume'] as num?)?.toDouble() ?? 0.45;
     liquidGlassChatUi = data['liquidGlassChatUi'] as bool? ?? false;
     showMicrophoneButton = data['showMicrophoneButton'] as bool? ?? false;
+    frameRateMode = AppFrameRateMode.values.firstWhere(
+      (value) => value.name == data['frameRateMode'],
+      orElse: () => AppFrameRateMode.adaptive,
+    );
     themePreference = AppThemePreference.values.firstWhere(
       (value) => value.name == data['themePreference'],
       orElse: () => AppThemePreference.system,
+    );
+    accentTheme = AppAccentTheme.values.firstWhere(
+      (v) => v.name == data['accentTheme'],
+      orElse: () => AppAccentTheme.jade,
     );
     interfaceLanguage = AppLanguage.values.firstWhere(
       (value) => value.name == data['interfaceLanguage'],
@@ -1899,10 +2658,28 @@ ${longTermMemoryEnabled ? (agentEnabled ? '需要回忆过往事件、约定或�
     mapVisitCount = progress['mapVisitCount'] as int? ?? 0;
     travelCount = progress['travelCount'] as int? ?? 0;
     sceneChangeCount = progress['sceneChangeCount'] as int? ?? 0;
+    gatherCount = progress['gatherCount'] as int? ?? 0;
+    synthesisCount = progress['synthesisCount'] as int? ?? 0;
+    storyQuestIndex = (progress['storyQuestIndex'] as int? ?? 0).clamp(
+      0,
+      builtInStoryQuests.length,
+    );
+    storyQuestBaseline =
+        progress['storyQuestBaseline'] as int? ??
+        (storyQuestIndex < builtInStoryQuests.length
+            ? _questCounter(builtInStoryQuests[storyQuestIndex].objectiveType)
+            : 0);
     stars = progress['stars'] as int? ?? 0;
     claimedMissionIds = (progress['claimedMissionIds'] as List<dynamic>? ?? [])
         .whereType<String>()
         .toSet();
+    if (data['alchemy'] case final Map<dynamic, dynamic> alchemy) {
+      alchemyState = AlchemyState.fromJson(Map<String, dynamic>.from(alchemy));
+    }
+    if (!progress.containsKey('synthesisCount')) {
+      synthesisCount = alchemyState.history.length;
+    }
+    dynamicQuests = _parseDynamicQuests(data['dynamicQuests']);
     final preferences = data['preferences'] as Map<String, dynamic>? ?? {};
     aiEnabled = preferences['aiEnabled'] as bool? ?? false;
     llmProvider = LlmProvider.values.firstWhere(
@@ -1911,6 +2688,9 @@ ${longTermMemoryEnabled ? (agentEnabled ? '需要回忆过往事件、约定或�
     );
     openAiBaseUrl = preferences['openAiBaseUrl'] as String? ?? openAiBaseUrl;
     openAiModel = preferences['openAiModel'] as String? ?? openAiModel;
+    if (preferences.containsKey('openAiConfigurations')) {
+      _restoreOpenAiConfigurations(preferences['openAiConfigurations']);
+    }
     geminiBaseUrl = preferences['geminiBaseUrl'] as String? ?? geminiBaseUrl;
     geminiModel = preferences['geminiModel'] as String? ?? geminiModel;
     openAiAdvancedEnabled =
@@ -1928,6 +2708,7 @@ ${longTermMemoryEnabled ? (agentEnabled ? '需要回忆过往事件、约定或�
         preferences['worldSettingInjectionEnabled'] as bool? ?? true;
     characterPersona = preferences['characterPersona'] as String? ?? '';
     worldSetting = preferences['worldSetting'] as String? ?? '';
+    _restoreSettingsSlots(data['settingsSlots']);
     llmContextCompatibility =
         preferences['llmContextCompatibility'] as bool? ?? false;
     npcInteractionFrequency = NpcInteractionFrequency.values.firstWhere(
@@ -1994,7 +2775,62 @@ ${longTermMemoryEnabled ? (agentEnabled ? '需要回忆过往事件、约定或�
     ttsPreviewText = preferences['ttsPreviewText'] as String? ?? ttsPreviewText;
     longTermMemoryEnabled =
         preferences['longTermMemoryEnabled'] as bool? ?? true;
-    _changed();
+  }
+
+  Future<void> _hydrateMessageAttachments() async {
+    final hydratedMessages = <ChatMessage>[];
+    for (final message in messages) {
+      var changed = false;
+      final hydratedAttachments = <ChatAttachment>[];
+      for (final attachment in message.attachments) {
+        if (attachment.isImage &&
+            attachment.thumbnailBytes != null &&
+            attachment.thumbnailKey == null) {
+          final key = await AttachmentThumbnailStore.write(
+            attachment.thumbnailBytes!,
+          );
+          if (key != null) {
+            hydratedAttachments.add(attachment.copyWith(thumbnailKey: key));
+            changed = true;
+            continue;
+          }
+        } else if (attachment.isImage &&
+            attachment.thumbnailBytes != null &&
+            attachment.thumbnailKey != null) {
+          final existing = await AttachmentThumbnailStore.read(
+            attachment.thumbnailKey,
+          );
+          if (existing == null) {
+            final key = await AttachmentThumbnailStore.write(
+              attachment.thumbnailBytes!,
+            );
+            hydratedAttachments.add(
+              attachment.copyWith(thumbnailKey: key, replaceThumbnailKey: true),
+            );
+            changed = true;
+            continue;
+          }
+        } else if (attachment.isImage &&
+            attachment.previewBytes == null &&
+            attachment.thumbnailKey != null) {
+          final thumbnail = await AttachmentThumbnailStore.read(
+            attachment.thumbnailKey,
+          );
+          if (thumbnail != null) {
+            hydratedAttachments.add(
+              attachment.copyWith(thumbnailBytes: thumbnail),
+            );
+            changed = true;
+            continue;
+          }
+        }
+        hydratedAttachments.add(attachment);
+      }
+      hydratedMessages.add(
+        changed ? message.copyWith(attachments: hydratedAttachments) : message,
+      );
+    }
+    messages = hydratedMessages;
   }
 
   void recordCharacterTouch() {
@@ -2002,9 +2838,446 @@ ${longTermMemoryEnabled ? (agentEnabled ? '需要回忆过往事件、约定或�
     _changed();
   }
 
+  List<AlchemyItem> alchemyItemsForCategory(String category) => alchemyState
+      .inventory
+      .where((item) {
+        return item.quantity > 0 && item.categories.contains(category);
+      })
+      .toList(growable: false);
+
+  AlchemyItem _findAlchemyItem(String id) => alchemyState.inventory.firstWhere(
+    (item) => item.instanceId == id && item.quantity > 0,
+    orElse: () => throw const FormatException('素材不存在或数量不足'),
+  );
+
+  Map<String, int> _requiredAlchemyCounts(
+    List<AlchemyItem> ingredients,
+    AlchemyItem? catalyst,
+  ) {
+    final requiredCounts = <String, int>{};
+    for (final item in [...ingredients, ?catalyst]) {
+      requiredCounts.update(
+        item.instanceId,
+        (value) => value + 1,
+        ifAbsent: () => 1,
+      );
+    }
+    for (final entry in requiredCounts.entries) {
+      if (_findAlchemyItem(entry.key).quantity < entry.value) {
+        throw const FormatException('素材数量不足');
+      }
+    }
+    return requiredCounts;
+  }
+
+  void _commitSynthesis({
+    required AlchemyItem result,
+    required String recipeId,
+    required Map<String, int> requiredCounts,
+  }) {
+    final remaining = <AlchemyItem>[];
+    for (final item in alchemyState.inventory) {
+      final quantity = item.quantity - (requiredCounts[item.instanceId] ?? 0);
+      if (quantity > 0) remaining.add(item.copyWith(quantity: quantity));
+    }
+    remaining.add(result);
+    alchemyState = AlchemyState(
+      inventory: remaining,
+      history: [
+        AlchemyHistoryEntry(
+          result: result,
+          recipeId: recipeId,
+          createdAt: result.acquiredAt,
+        ),
+        ...alchemyState.history,
+      ].take(50).toList(growable: false),
+      gatherAvailableAtByStage: alchemyState.gatherAvailableAtByStage,
+    );
+    synthesisCount += 1;
+    _changed();
+  }
+
+  AlchemyItem synthesizeCustomItem({
+    required String name,
+    required String description,
+    required List<String> ingredientIds,
+    String category = '',
+    String? catalystId,
+    Random? random,
+  }) {
+    final normalizedName = name.replaceAll(RegExp(r'[\r\n]+'), ' ').trim();
+    final normalizedDescription = description
+        .replaceAll(RegExp(r'[\r\n]+'), ' ')
+        .trim();
+    final normalizedCategory = category
+        .replaceAll(RegExp(r'[\r\n]+'), ' ')
+        .trim();
+    if (normalizedName.isEmpty || normalizedName.length > 40) {
+      throw const FormatException('成品名称需要 1 至 40 字符');
+    }
+    if (normalizedDescription.isEmpty || normalizedDescription.length > 300) {
+      throw const FormatException('成品描述需要 1 至 300 字符');
+    }
+    if (normalizedCategory.length > 40) {
+      throw const FormatException('成品分类不能超过 40 字符');
+    }
+    if (ingredientIds.isEmpty || ingredientIds.length > 6) {
+      throw const FormatException('请选择 1 至 6 份真实库存素材');
+    }
+    final ingredients = ingredientIds
+        .map(_findAlchemyItem)
+        .toList(growable: false);
+    final catalyst = catalystId == null ? null : _findAlchemyItem(catalystId);
+    final requiredCounts = _requiredAlchemyCounts(ingredients, catalyst);
+    final result = const AlchemyEngine().synthesizeCustom(
+      name: normalizedName,
+      description: normalizedDescription,
+      category: normalizedCategory,
+      ingredients: ingredients,
+      catalyst: catalyst,
+      random: random,
+    );
+    _commitSynthesis(
+      result: result,
+      recipeId: 'custom',
+      requiredCounts: requiredCounts,
+    );
+    return result;
+  }
+
+  Map<String, dynamic> _alchemyItemToolJson(AlchemyItem item) => {
+    'instance_id': item.instanceId,
+    'template_id': item.templateId,
+    'name': item.displayNameFor(interfaceLanguage),
+    'description': item.descriptionFor(interfaceLanguage),
+    'type': item.type.name,
+    'categories': item.categories.toList()..sort(),
+    'quantity': item.quantity,
+    'quality': item.quality,
+    'quality_rank': item.qualityRank,
+    'tags': [
+      for (final id in item.tagIds)
+        {'id': id, 'name': AlchemyCatalog.tags[id]?.name ?? id},
+    ],
+  };
+
+  String _alchemyInventoryToolResult() => jsonEncode({
+    'ok': true,
+    'location': {
+      'area_id': selectedAreaId,
+      'area_name': selectedAreaName,
+      'stage_id': selectedStageId,
+      'stage_name': selectedStageName,
+      'gathering_scene_ready': _gatheringSceneReady,
+    },
+    'inventory': alchemyState.inventory
+        .where((item) => item.quantity > 0)
+        .map(_alchemyItemToolJson)
+        .toList(growable: false),
+    'recipe_source': 'llm_generated',
+  });
+
+  List<GatherDiscovery> _parseGatherDiscoveries(Object? rawDiscoveries) {
+    if (rawDiscoveries == null) return const [];
+    if (rawDiscoveries is! List || rawDiscoveries.length > 3) {
+      throw const FormatException('discoveries 需要包含 1 至 3 种素材');
+    }
+    final discoveries = <GatherDiscovery>[];
+    for (final raw in rawDiscoveries) {
+      if (raw is! Map) throw const FormatException('素材发现数据格式无效');
+      final value = Map<String, dynamic>.from(raw);
+      final name = (value['name'] as String? ?? '')
+          .replaceAll(RegExp(r'[\r\n]+'), ' ')
+          .trim();
+      final description = (value['description'] as String? ?? '')
+          .replaceAll(RegExp(r'[\r\n]+'), ' ')
+          .trim();
+      if (name.isEmpty || name.length > 40) {
+        throw const FormatException('采集物名称需要 1 至 40 字符');
+      }
+      if (description.isEmpty || description.length > 200) {
+        throw const FormatException('采集物描述需要 1 至 200 字符');
+      }
+      final rawCategories = value['categories'];
+      if (rawCategories is! List || rawCategories.isEmpty) {
+        throw const FormatException('每种采集物至少需要一个分类');
+      }
+      final categories = rawCategories
+          .whereType<String>()
+          .map((item) => item.replaceAll(RegExp(r'[\r\n]+'), ' ').trim())
+          .where((item) => item.isNotEmpty)
+          .take(6)
+          .toList(growable: false);
+      if (categories.isEmpty || categories.any((item) => item.length > 30)) {
+        throw const FormatException('采集物分类无效或过长');
+      }
+      final suggestedTagIds =
+          (value['suggested_trait_ids'] as List? ?? const [])
+              .whereType<String>()
+              .where(AlchemyCatalog.tags.containsKey)
+              .toSet()
+              .take(4)
+              .toList(growable: false);
+      discoveries.add(
+        GatherDiscovery(
+          name: name,
+          description: description,
+          categories: categories,
+          suggestedTagIds: suggestedTagIds,
+        ),
+      );
+    }
+    if (discoveries.isEmpty) {
+      throw const FormatException('discoveries 需要包含 1 至 3 种素材');
+    }
+    return discoveries;
+  }
+
+  bool _sameAlchemyStack(AlchemyItem left, AlchemyItem right) =>
+      left.templateId == right.templateId &&
+      left.quality == right.quality &&
+      listEquals(left.tagIds, right.tagIds) &&
+      left.customName == right.customName &&
+      left.customDescription == right.customDescription &&
+      left.customType == right.customType &&
+      listEquals(left.customCategories, right.customCategories);
+
+  String _gatherCurrentLocationToolResult(Map<String, dynamic> args) {
+    if (!_gatheringSceneReady) {
+      return jsonEncode({
+        'ok': false,
+        'error': 'travel_required',
+        'message': '请先在世界地图选择具体地点并进入采集场景。',
+      });
+    }
+    try {
+      final discoveries = _parseGatherDiscoveries(args['discoveries']);
+      final result = gatherAtCurrentLocation(discoveries: discoveries);
+      final storedItems = <Map<String, dynamic>>[];
+      for (final gathered in result.items) {
+        final stored = alchemyState.inventory.firstWhere(
+          (item) => _sameAlchemyStack(item, gathered),
+        );
+        storedItems.add({
+          ..._alchemyItemToolJson(stored),
+          'gathered_quantity': gathered.quantity,
+        });
+      }
+      return jsonEncode({
+        'ok': true,
+        'location': '$selectedAreaName / $selectedStageName',
+        'node': result.node.name,
+        'discovery_source': discoveries.isEmpty
+            ? 'local_catalog_fallback'
+            : 'llm_scene_discovery',
+        'items': storedItems,
+        'next_available_at': result.nextAvailableAt.toIso8601String(),
+        'message': '随机采集结果已写入背包。',
+      });
+    } on GatherCooldownException catch (error) {
+      return jsonEncode({
+        'ok': false,
+        'error': 'gathering_cooldown',
+        'remaining_seconds': (error.remaining.inMilliseconds / 1000)
+            .ceil()
+            .clamp(1, 9999),
+        'message': '当前采集点尚未恢复。',
+      });
+    } on FormatException catch (error) {
+      return jsonEncode({
+        'ok': false,
+        'error': 'invalid_discoveries',
+        'message': error.message,
+      });
+    }
+  }
+
+  String _synthesizeToolResult(Map<String, dynamic> args) {
+    try {
+      final name = (args['name'] as String? ?? '').trim();
+      final description = (args['description'] as String? ?? '').trim();
+      final category = (args['category'] as String? ?? '').trim();
+      final intendedEffect = (args['intended_effect'] as String? ?? '').trim();
+      final rawIds = args['ingredient_instance_ids'];
+      if (rawIds is! List) {
+        throw const FormatException('ingredient_instance_ids 必须是数组');
+      }
+      final ingredientIds = rawIds
+          .whereType<String>()
+          .map((id) => id.trim())
+          .where((id) => id.isNotEmpty)
+          .toList(growable: false);
+      if (ingredientIds.length != rawIds.length) {
+        throw const FormatException('素材实例 ID 无效');
+      }
+      final catalystValue = (args['catalyst_instance_id'] as String?)?.trim();
+      final catalystId = catalystValue?.isEmpty == true ? null : catalystValue;
+      final consumedCounts = <String, int>{};
+      for (final id in [...ingredientIds, ?catalystId]) {
+        consumedCounts.update(id, (value) => value + 1, ifAbsent: () => 1);
+      }
+      final consumed = [
+        for (final entry in consumedCounts.entries)
+          {
+            'instance_id': entry.key,
+            'name': _findAlchemyItem(entry.key)
+                .displayNameFor(interfaceLanguage),
+            'quantity_used': entry.value,
+          },
+      ];
+      final details = [
+        description,
+        if (intendedEffect.isNotEmpty)
+          '${interfaceLanguage.text('预期效果：', 'Intended effect: ', '想定効果：')}$intendedEffect',
+      ].where((value) => value.isNotEmpty).join(' ');
+      final result = synthesizeCustomItem(
+        name: name,
+        description: details,
+        category: category,
+        ingredientIds: ingredientIds,
+        catalystId: catalystId,
+      );
+      return jsonEncode({
+        'ok': true,
+        'kind': 'llm_recipe',
+        'result': _alchemyItemToolJson(result),
+        'consumed': consumed,
+        'message': '调合已完成，结果和素材消耗已写入本地背包。',
+      });
+    } on Object catch (error) {
+      return jsonEncode({
+        'ok': false,
+        'error': 'synthesis_failed',
+        'message': error is FormatException ? error.message : error.toString(),
+      });
+    }
+  }
+
+  Duration gatherCooldownRemaining({DateTime? now}) {
+    final current = now ?? DateTime.now();
+    final availableAt = alchemyState.gatherAvailableAtByStage[selectedStageId];
+    if (availableAt == null || !availableAt.isAfter(current)) {
+      return Duration.zero;
+    }
+    return availableAt.difference(current);
+  }
+
+  GatherResult gatherAtCurrentLocation({
+    Random? random,
+    DateTime? now,
+    List<GatherDiscovery> discoveries = const [],
+  }) {
+    final gatheredAt = now ?? DateTime.now();
+    final remaining = gatherCooldownRemaining(now: gatheredAt);
+    if (remaining > Duration.zero) {
+      throw GatherCooldownException(remaining);
+    }
+    final node = AlchemyCatalog.gatherNodeForLocation(
+      areaId: selectedAreaId,
+      stageId: selectedStageId,
+    );
+    final result = discoveries.isEmpty
+        ? const GatherEngine().gather(
+            node: node,
+            random: random,
+            now: gatheredAt,
+          )
+        : const GatherEngine().gatherDiscoveries(
+            node: node,
+            discoveries: discoveries,
+            random: random,
+            now: gatheredAt,
+          );
+    final inventory = alchemyState.inventory.toList();
+    for (final gatheredItem in result.items) {
+      final existingIndex = inventory.indexWhere(
+        (item) => _sameAlchemyStack(item, gatheredItem),
+      );
+      if (existingIndex < 0) {
+        inventory.add(gatheredItem);
+        continue;
+      }
+      final existing = inventory[existingIndex];
+      inventory[existingIndex] = existing.copyWith(
+        quantity: existing.quantity + gatheredItem.quantity,
+      );
+    }
+    alchemyState = AlchemyState(
+      inventory: inventory,
+      history: alchemyState.history,
+      gatherAvailableAtByStage: {
+        ...alchemyState.gatherAvailableAtByStage,
+        selectedStageId: result.nextAvailableAt,
+      },
+    );
+    gatherCount += 1;
+    _changed();
+    return result;
+  }
+
   void recordMapVisit() {
     mapVisitCount += 1;
     _changed();
+  }
+
+  String _inspectMapLocationsToolResult(Map<String, dynamic> args) {
+    final query = (args['query'] as String? ?? '').trim();
+    if (query.length > 80) {
+      return jsonEncode({
+        'ok': false,
+        'error': 'query_too_long',
+        'message': '地点关键词不能超过 80 个字符。',
+      });
+    }
+    final matches = worldTravelCatalog.search(
+      query: query,
+      currentAreaId: selectedAreaId,
+    );
+    return jsonEncode({
+      'ok': true,
+      'current_stage_id': selectedStageId,
+      'current_location': '$selectedAreaName / $selectedStageName',
+      'query': query,
+      'destinations': matches
+          .map((item) => item.toToolJson(interfaceLanguage))
+          .toList(growable: false),
+      'truncated': matches.length >= 40,
+      'message': query.isEmpty
+          ? '已列出当前区域可前往地点。需要其他区域时请用地名关键词再次查询。'
+          : '只可将 destinations 中的 stage_id 传给 travel_to_stage。',
+    });
+  }
+
+  String _travelToStageToolResult(Map<String, dynamic> args) {
+    final stageId = (args['stage_id'] as String? ?? '').trim();
+    final destination = worldTravelCatalog.byStageId(stageId);
+    if (destination == null) {
+      return jsonEncode({
+        'ok': false,
+        'error': 'unknown_stage',
+        'message': '地点不存在。请先调用 inspect_map_locations 获取有效 stage_id。',
+      });
+    }
+    if (destination.stageId == selectedStageId) {
+      return jsonEncode({
+        'ok': true,
+        'changed': false,
+        'stage_id': selectedStageId,
+        'message': '莱莎和用户已经在这里，无需重复切换。',
+      });
+    }
+    selectLocation(
+      areaId: destination.areaId,
+      stageId: destination.stageId,
+      areaName: destination.localizedAreaName(interfaceLanguage),
+      stageName: destination.localizedStageName(interfaceLanguage),
+    );
+    return jsonEncode({
+      'ok': true,
+      'changed': true,
+      ...destination.toToolJson(interfaceLanguage),
+      'message': '地图、背景、环境音和背景音乐将按新地点同步；最终回复应自然承接抵达后的场景。',
+    });
   }
 
   void selectLocation({
@@ -2021,10 +3294,12 @@ ${longTermMemoryEnabled ? (agentEnabled ? '需要回忆过往事件、约定或�
     if (stageName != null && stageName.trim().isNotEmpty) {
       selectedStageName = stageName.trim();
     }
+    _gatheringSceneReady = true;
     travelCount += 1;
     messages.add(
       ChatMessage(
-        text: '旁白：地图已切换至 $selectedAreaName・$selectedStageName。',
+        text:
+            '旁白：你和莱莎已抵达 $selectedAreaName・$selectedStageName。现在可以通过对话决定是否在这里采集。',
         isUser: false,
       ),
     );
@@ -2089,8 +3364,20 @@ ${longTermMemoryEnabled ? (agentEnabled ? '需要回忆过往事件、约定或�
     _changed();
   }
 
+  void setFrameRateMode(AppFrameRateMode value) {
+    if (frameRateMode == value) return;
+    frameRateMode = value;
+    frameRate.setMode(value);
+    _changed();
+  }
+
   void setThemePreference(AppThemePreference value) {
     themePreference = value;
+    _changed();
+  }
+
+  void setAccentTheme(AppAccentTheme value) {
+    accentTheme = value;
     _changed();
   }
 
@@ -2131,8 +3418,12 @@ ${longTermMemoryEnabled ? (agentEnabled ? '需要回忆过往事件、约定或�
     return true;
   }
 
-  void clearChatHistory() {
+  void clearChatHistory({bool clearLongTermMemory = false}) {
     messages = [_initialMessage];
+    if (clearLongTermMemory) memorySummary = '';
+    // Invalidate pending replies, speech and memory consolidation from the
+    // deleted conversation using the same reset path as loading a save.
+    _dataRevision += 1;
     _changed();
   }
 
@@ -2182,11 +3473,37 @@ ${longTermMemoryEnabled ? (agentEnabled ? '需要回忆过往事件、约定或�
 
   void _changed() {
     notifyListeners();
-    unawaited(_save());
+    _scheduleSave();
+  }
+
+  void _scheduleSave() {
+    if (_saveInProgress) {
+      _saveAgain = true;
+      return;
+    }
+    _saveInProgress = true;
+    unawaited(_drainPendingSaves());
+  }
+
+  Future<void> _drainPendingSaves() async {
+    do {
+      _saveAgain = false;
+      try {
+        await _save();
+      } on Object catch (error, stackTrace) {
+        RuntimeLog.instance.error('Persistence', error, stackTrace);
+      }
+    } while (_saveAgain);
+    _saveInProgress = false;
   }
 
   Future<void> _save() async {
     await Future.wait<void>([
+      _preferences.setString('accent_theme', accentTheme.name),
+      _preferences.setString(
+        'settings_slots_v1',
+        jsonEncode(_settingsSlotsJson),
+      ),
       _preferences.setString(
         'chat_messages',
         jsonEncode(messages.map((message) => message.toJson()).toList()),
@@ -2199,6 +3516,10 @@ ${longTermMemoryEnabled ? (agentEnabled ? '需要回忆过往事件、约定或�
       _preferences.setString('llm_provider', llmProvider.name),
       _preferences.setString('openai_base_url', openAiBaseUrl),
       _preferences.setString('openai_model', openAiModel),
+      _preferences.setString(
+        'openai_configurations_v1',
+        jsonEncode(openAiConfigurations.toJson()),
+      ),
       _preferences.setString('gemini_base_url', geminiBaseUrl),
       _preferences.setString('gemini_model', geminiModel),
       _preferences.setBool('openai_advanced_enabled', openAiAdvancedEnabled),
@@ -2277,6 +3598,11 @@ ${longTermMemoryEnabled ? (agentEnabled ? '需要回忆过往事件、约定或�
         userInteractionStyle.name,
       ),
       _preferences.setString(
+        'user_relationship_custom',
+        userRelationshipCustom,
+      ),
+      _preferences.setString('user_interaction_custom', userInteractionCustom),
+      _preferences.setString(
         'user_interaction_boundaries',
         userInteractionBoundaries,
       ),
@@ -2289,6 +3615,7 @@ ${longTermMemoryEnabled ? (agentEnabled ? '需要回忆过往事件、约定或�
       _preferences.setBool('liquid_glass_chat_ui', liquidGlassChatUi),
       _preferences.setBool('gaze_tracking_enabled', gazeTrackingEnabled),
       _preferences.setBool('show_microphone_button', showMicrophoneButton),
+      _preferences.setString('frame_rate_mode', frameRateMode.name),
       _preferences.setString('theme_preference', themePreference.name),
       _preferences.setString('interface_language', interfaceLanguage.name),
       _preferences.setString('narrator_language', narratorLanguage.name),
@@ -2310,11 +3637,30 @@ ${longTermMemoryEnabled ? (agentEnabled ? '需要回忆过往事件、约定或�
       _preferences.setInt('map_visit_count', mapVisitCount),
       _preferences.setInt('travel_count', travelCount),
       _preferences.setInt('scene_change_count', sceneChangeCount),
+      _preferences.setInt('gather_count', gatherCount),
+      _preferences.setInt('synthesis_count', synthesisCount),
+      _preferences.setBool('story_quest_initialized', true),
+      _preferences.setInt('story_quest_index', storyQuestIndex),
+      _preferences.setInt('story_quest_baseline', storyQuestBaseline),
       _preferences.setInt('stars', stars),
       _preferences.setStringList(
         'claimed_missions',
         claimedMissionIds.toList(),
       ),
+      _preferences.setString(
+        'dynamic_quests',
+        jsonEncode(dynamicQuests.map((quest) => quest.toJson()).toList()),
+      ),
+      _preferences.setString(
+        'alchemy_save_v1',
+        jsonEncode(alchemyState.toJson()),
+      ),
     ]);
+  }
+
+  @override
+  void dispose() {
+    frameRate.dispose();
+    super.dispose();
   }
 }

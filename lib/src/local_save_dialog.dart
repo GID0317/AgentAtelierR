@@ -60,16 +60,16 @@ class _LocalSaveDialogState extends State<_LocalSaveDialog> {
 
   Future<void> _save(int index, bool occupied) async {
     if (_busy) return;
-    if (occupied &&
-        !await _confirm(
-          title: _text('覆盖存档？', 'Overwrite save?', 'セーブを上書きしますか？'),
-          body: _text(
-            '槽位 ${index + 1} 的旧存档将被替换。',
-            'The existing save in slot ${index + 1} will be replaced.',
-            'スロット ${index + 1} の既存セーブは置き換えられます。',
-          ),
-        )) {
-      return;
+    if (occupied) {
+      final confirmed = await _confirm(
+        title: _text('覆盖存档？', 'Overwrite save?', 'セーブを上書きしますか？'),
+        body: _text(
+          '槽位 ${index + 1} 的旧存档将被替换。',
+          'The existing save in slot ${index + 1} will be replaced.',
+          'スロット ${index + 1} の既存セーブは置き換えられます。',
+        ),
+      );
+      if (!mounted || !confirmed) return;
     }
     setState(() => _busy = true);
     try {
@@ -78,29 +78,36 @@ class _LocalSaveDialogState extends State<_LocalSaveDialog> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(_text('存档完成', 'Game saved', 'セーブしました'))),
       );
+    } on Object catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('${_text('存档失败', 'Save failed', 'セーブ失敗')}: $error'),
+        ),
+      );
     } finally {
       if (mounted) setState(() => _busy = false);
     }
   }
 
   Future<void> _load(int index) async {
-    if (_busy ||
-        !await _confirm(
-          title: _text('读取存档？', 'Load save?', 'セーブを読み込みますか？'),
-          body: _text(
-            '当前尚未保存的进度会被槽位 ${index + 1} 替换。',
-            'Unsaved progress will be replaced by slot ${index + 1}.',
-            '未保存の進行状況はスロット ${index + 1} の内容に置き換えられます。',
-          ),
-        )) {
-      return;
-    }
+    if (_busy) return;
+    final confirmed = await _confirm(
+      title: _text('读取存档？', 'Load save?', 'セーブを読み込みますか？'),
+      body: _text(
+        '当前尚未保存的进度会被槽位 ${index + 1} 替换。',
+        'Unsaved progress will be replaced by slot ${index + 1}.',
+        '未保存の進行状況はスロット ${index + 1} の内容に置き換えられます。',
+      ),
+    );
+    if (!mounted || !confirmed) return;
     setState(() => _busy = true);
+    final messenger = ScaffoldMessenger.of(context);
     try {
-      widget.controller.loadFromLocalSlot(index);
+      await widget.controller.loadFromLocalSlot(index);
       if (!mounted) return;
       Navigator.pop(context);
-      ScaffoldMessenger.of(context).showSnackBar(
+      messenger.showSnackBar(
         SnackBar(content: Text(_text('读取完成', 'Save loaded', 'ロードしました'))),
       );
     } on Object catch (error) {
@@ -115,20 +122,29 @@ class _LocalSaveDialogState extends State<_LocalSaveDialog> {
   }
 
   Future<void> _delete(int index) async {
-    if (_busy ||
-        !await _confirm(
-          title: _text('删除存档？', 'Delete save?', 'セーブを削除しますか？'),
-          body: _text(
-            '槽位 ${index + 1} 删除后无法恢复。',
-            'Slot ${index + 1} cannot be recovered after deletion.',
-            'スロット ${index + 1} は削除後に復元できません。',
-          ),
-        )) {
-      return;
-    }
+    if (_busy) return;
+    final confirmed = await _confirm(
+      title: _text('删除存档？', 'Delete save?', 'セーブを削除しますか？'),
+      body: _text(
+        '槽位 ${index + 1} 删除后无法恢复。',
+        'Slot ${index + 1} cannot be recovered after deletion.',
+        'スロット ${index + 1} は削除後に復元できません。',
+      ),
+    );
+    if (!mounted || !confirmed) return;
     setState(() => _busy = true);
-    await widget.controller.deleteLocalSlot(index);
-    if (mounted) setState(() => _busy = false);
+    try {
+      await widget.controller.deleteLocalSlot(index);
+    } on Object catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('${_text('删除失败', 'Delete failed', '削除失敗')}: $error'),
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
   }
 
   @override

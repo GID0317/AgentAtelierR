@@ -106,11 +106,100 @@ void main() {
     }
   });
   test(
+    'Gemini accepts DONE variants and final SSE frames without blank lines',
+    () async {
+      final text = event({
+        'event_type': 'step.delta',
+        'delta': {'type': 'text', 'text': '你好，莱莎'},
+      });
+      final completed = event({
+        'event_type': 'interaction.completed',
+        'interaction': {'status': 'completed'},
+      });
+      for (final ending in [
+        'data: [DONE]\n\n',
+        'data: \uFEFF[done]\u0000  \r\n\r\n',
+        'data: [DONE]',
+        completed.trimRight(),
+        '${completed}data: [DONE]\n\n',
+      ]) {
+        final bytes = utf8.encode(': keepalive\r\n\r\n$text$ending');
+        final client = OpenAiCompatibleClient(
+          client: MockClient.streaming(
+            (request, body) async => http.StreamedResponse(
+              Stream.fromIterable([
+                // Split every byte, including inside a multi-byte Chinese character.
+                for (final byte in bytes) [byte],
+              ]),
+              200,
+              headers: {'content-type': 'text/event-stream'},
+            ),
+          ),
+        );
+        expect(
+          await client
+              .streamChat(
+                provider: LlmProvider.gemini,
+                baseUrl: 'https://example.test/v1beta',
+                apiKey: 'test',
+                model: 'test',
+                systemPrompt: 'test',
+                messages: const [ChatMessage(text: 'hi', isUser: true)],
+              )
+              .join(),
+          '你好，莱莎',
+          reason: ending,
+        );
+      }
+    },
+  );
+
+  test(
+    'DONE never hides a preceding Gemini failure or empty response',
+    () async {
+      for (final prefix in [
+        '',
+        event({
+          'error': {'message': 'upstream failure'},
+        }),
+        event({
+          'event_type': 'interaction.completed',
+          'interaction': {'status': 'failed'},
+        }),
+      ]) {
+        final client = OpenAiCompatibleClient(
+          client: MockClient(
+            (request) async => http.Response(
+              '${prefix}data: [DONE]\n\n',
+              200,
+              headers: {'content-type': 'text/event-stream'},
+            ),
+          ),
+        );
+        await expectLater(
+          client
+              .streamChat(
+                provider: LlmProvider.gemini,
+                baseUrl: 'https://example.test/v1beta',
+                apiKey: 'test',
+                model: 'test',
+                systemPrompt: 'test',
+                messages: const [ChatMessage(text: 'hi', isUser: true)],
+              )
+              .join(),
+          throwsA(isA<AiServiceException>()),
+        );
+      }
+    },
+  );
+
+  test(
     'agent replays native tool calls and signatures without cloud storage',
     () async {
       var requests = 0;
       var executed = 0;
       final client = OpenAiCompatibleClient(
+        contextToolExecutor: (name, args) async => '{"inventory":[]}',
         agentToolExecutor: (name, args) async {
           executed++;
           return '2026-09-09';
@@ -119,6 +208,21 @@ void main() {
           final body = jsonDecode(request.body) as Map;
           expect(body['tools'][0]['type'], 'function');
           expect((body['tools'][0] as Map).containsKey('function'), false);
+          expect(
+            (body['tools'] as List).map((tool) => tool['name']),
+            containsAll([
+              'inspect_quests',
+              'create_quest',
+              'inspect_alchemy_inventory',
+            ]),
+          );
+          final gatherTool = (body['tools'] as List).firstWhere(
+            (tool) => tool['name'] == 'gather_current_location',
+          ) as Map;
+          expect(
+            (gatherTool['parameters'] as Map)['required'],
+            contains('discoveries'),
+          );
           if (requests++ == 0) {
             return result([
               {'type': 'thought', 'signature': 'preserved'},

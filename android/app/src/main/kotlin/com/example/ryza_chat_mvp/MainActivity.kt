@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -14,10 +15,15 @@ import androidx.core.app.ActivityCompat
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import kotlin.math.abs
 
 class MainActivity : FlutterActivity() {
     private val channelName = "ryza_chat/device_tools"
+    private val frameRateChannelName = "agent_atelier_r/frame_rate"
     private val mainHandler = Handler(Looper.getMainLooper())
+    private var requestedFramesPerSecond = 24f
+    private var preferMaximumFrameRate = false
+    private var hasFrameRateRequest = false
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -29,6 +35,106 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, frameRateChannelName)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "setPreferredFrameRate" -> {
+                        requestedFramesPerSecond =
+                            (call.argument<Double>("framesPerSecond") ?: 24.0)
+                                .toFloat()
+                                .coerceIn(1f, 240f)
+                        preferMaximumFrameRate =
+                            call.argument<Boolean>("preferMaximum") ?: false
+                        hasFrameRateRequest = true
+                        result.success(
+                            applyPreferredFrameRate(
+                                requestedFramesPerSecond,
+                                preferMaximumFrameRate,
+                            ),
+                        )
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (hasFrameRateRequest) {
+            mainHandler.post {
+                applyPreferredFrameRate(
+                    requestedFramesPerSecond,
+                    preferMaximumFrameRate,
+                )
+            }
+        }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus && hasFrameRateRequest) {
+            applyPreferredFrameRate(
+                requestedFramesPerSecond,
+                preferMaximumFrameRate,
+            )
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun applyPreferredFrameRate(
+        requested: Float,
+        preferMaximum: Boolean,
+    ): Map<String, Any> {
+        val activeDisplay = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            display
+        } else {
+            windowManager.defaultDisplay
+        }
+        if (activeDisplay == null) {
+            return mapOf(
+                "requestedFramesPerSecond" to requested.toDouble(),
+                "appliedFramesPerSecond" to requested.toDouble(),
+                "displayModeId" to 0,
+            )
+        }
+
+        val currentMode = activeDisplay.mode
+        val sameResolutionModes = activeDisplay.supportedModes.filter { mode ->
+            mode.physicalWidth == currentMode.physicalWidth &&
+                mode.physicalHeight == currentMode.physicalHeight
+        }
+        val modes = sameResolutionModes.ifEmpty {
+            activeDisplay.supportedModes.toList()
+        }
+        val selectedMode = if (preferMaximum) {
+            modes.maxByOrNull { it.refreshRate }
+        } else {
+            modes.minByOrNull { abs(it.refreshRate - requested) }
+        }
+        val exactMode = selectedMode != null &&
+            abs(selectedMode.refreshRate - requested) < 0.75f
+        val attributes = window.attributes
+        attributes.preferredDisplayModeId = if (
+            selectedMode != null && (preferMaximum || exactMode)
+        ) {
+            selectedMode.modeId
+        } else {
+            0
+        }
+        attributes.preferredRefreshRate = when {
+            selectedMode == null -> requested
+            preferMaximum || exactMode -> selectedMode.refreshRate
+            requested >= 30f -> requested
+            else -> selectedMode.refreshRate
+        }
+        window.attributes = attributes
+
+        return mapOf(
+            "requestedFramesPerSecond" to requested.toDouble(),
+            "appliedFramesPerSecond" to
+                (selectedMode?.refreshRate ?: requested).toDouble(),
+            "displayModeId" to (selectedMode?.modeId ?: 0),
+        )
     }
 
     private fun listLaunchableApps(): List<Map<String, String>> {

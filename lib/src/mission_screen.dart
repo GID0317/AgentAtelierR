@@ -2,250 +2,484 @@ import 'package:flutter/material.dart';
 
 import 'app_controller.dart';
 import 'app_localization.dart';
+import 'glass_ui.dart';
+import 'quest_models.dart';
 
 class MissionScreen extends StatelessWidget {
-  const MissionScreen({
-    super.key,
-    required this.controller,
-    required this.onMenuPressed,
-  });
+  const MissionScreen({super.key, required this.controller});
 
   final AppController controller;
-  final VoidCallback onMenuPressed;
 
   @override
   Widget build(BuildContext context) {
     final language = controller.interfaceLanguage;
-    final completed = AppController.missions
-        .where(controller.isMissionComplete)
-        .length;
-
-    return Scaffold(
-      appBar: AppBar(
-        leading: IconButton(
-          onPressed: onMenuPressed,
-          tooltip: language.text('菜单', 'Menu', 'メニュー'),
-          icon: const Icon(Icons.menu),
-        ),
-        title: Text(language.text('欢迎任务', 'Welcome missions', 'ウェルカムミッション')),
-        actions: [
-          Padding(
-            padding: const EdgeInsets.only(right: 16),
-            child: Center(
-              child: Row(
-                children: [
-                  const Icon(Icons.star_rounded, color: Color(0xFFE39B28)),
-                  const SizedBox(width: 4),
-                  Text(
-                    '${controller.stars}',
-                    style: const TextStyle(fontWeight: FontWeight.w700),
-                  ),
-                ],
+    return DefaultTabController(
+      length: 2,
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        appBar: AppBar(
+          automaticallyImplyLeading: false,
+          title: Padding(
+            padding: const EdgeInsets.only(left: 58),
+            child: Text(language.text('任务', 'Quests', 'クエスト')),
+          ),
+          actions: [
+            Padding(
+              padding: const EdgeInsets.only(right: 16),
+              child: Center(
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.star_rounded, color: Color(0xFFE39B28)),
+                    const SizedBox(width: 4),
+                    Text(
+                      '${controller.stars}',
+                      style: const TextStyle(fontWeight: FontWeight.w700),
+                    ),
+                  ],
+                ),
               ),
             ),
+          ],
+          bottom: TabBar(
+            tabs: [
+              Tab(text: language.text('主线', 'Story', 'メイン')),
+              Tab(text: language.text('莱莎委托', 'Ryza quests', 'ライザの依頼')),
+            ],
           ),
-        ],
-      ),
-      body: CustomScrollView(
-        slivers: [
-          SliverToBoxAdapter(
-            child: Stack(
-              children: [
-                SizedBox(
-                  width: double.infinity,
-                  height: 176,
-                  child: Image.asset(
-                    'assets/welcome_mission/bg.jpg',
-                    fit: BoxFit.cover,
-                  ),
-                ),
-                Positioned.fill(
-                  child: ColoredBox(
-                    color: Colors.black.withValues(alpha: 0.32),
-                  ),
-                ),
-                Positioned.fill(
-                  child: Padding(
-                    padding: const EdgeInsets.all(22),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisAlignment: MainAxisAlignment.end,
-                      children: [
-                        Text(
-                          language.text(
-                            '$completed / ${AppController.missions.length} 已完成',
-                            '$completed / ${AppController.missions.length} complete',
-                            '$completed / ${AppController.missions.length} 完了',
-                          ),
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 22,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                        const SizedBox(height: 10),
-                        LinearProgressIndicator(
-                          value: completed / AppController.missions.length,
-                          minHeight: 7,
-                          borderRadius: BorderRadius.circular(4),
-                          backgroundColor: Colors.white24,
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ],
-            ),
+        ),
+        body: GlassSurface(
+          liquidGlass: controller.liquidGlassChatUi,
+          tone: Theme.of(context).brightness == Brightness.dark
+              ? GlassTone.dark
+              : GlassTone.light,
+          borderRadius: BorderRadius.zero,
+          fallbackColor: Theme.of(context).brightness == Brightness.dark
+              ? const Color(0xD91C2222)
+              : const Color(0xB8EEF2F0),
+          child: TabBarView(
+            children: [
+              _StoryQuestList(controller: controller),
+              _DynamicQuestList(controller: controller),
+            ],
           ),
-          SliverPadding(
-            padding: const EdgeInsets.fromLTRB(12, 14, 12, 28),
-            sliver: SliverList.separated(
-              itemCount: AppController.missions.length,
-              separatorBuilder: (_, _) => const SizedBox(height: 8),
-              itemBuilder: (context, index) {
-                final mission = AppController.missions[index];
-                return _MissionTile(controller: controller, mission: mission);
-              },
-            ),
-          ),
-        ],
+        ),
       ),
     );
   }
 }
 
-class _MissionTile extends StatelessWidget {
-  const _MissionTile({required this.controller, required this.mission});
+class _StoryQuestList extends StatelessWidget {
+  const _StoryQuestList({required this.controller});
 
   final AppController controller;
-  final MissionDefinition mission;
 
   @override
   Widget build(BuildContext context) {
-    final progress = mission.progressOf(controller).clamp(0, mission.target);
-    final complete = controller.isMissionComplete(mission);
-    final claimed = controller.claimedMissionIds.contains(mission.id);
+    final language = controller.interfaceLanguage;
+    return ListView(
+      key: const PageStorageKey('story-quests'),
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+      children: [
+        Text(
+          language.text(
+            '主线进度 ${controller.storyQuestIndex} / ${builtInStoryQuests.length}',
+            'Story ${controller.storyQuestIndex} / ${builtInStoryQuests.length}',
+            'メイン進行 ${controller.storyQuestIndex} / ${builtInStoryQuests.length}',
+          ),
+          style: Theme.of(context).textTheme.titleMedium,
+        ),
+        const SizedBox(height: 8),
+        LinearProgressIndicator(
+          value: controller.storyQuestIndex / builtInStoryQuests.length,
+          minHeight: 7,
+          borderRadius: BorderRadius.circular(4),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          language.text(
+            '以《莱莎的炼金工房 1》的主要旅程为灵感重新概括，不复制原作任务文本。',
+            'An original condensed progression inspired by Atelier Ryza 1, without copied quest text.',
+            '「ライザのアトリエ1」の旅を着想に再構成した、原文を複製しない進行です。',
+          ),
+          style: TextStyle(
+            color: Theme.of(context).colorScheme.onSurfaceVariant,
+            fontSize: 12,
+          ),
+        ),
+        const SizedBox(height: 14),
+        for (var index = 0; index < builtInStoryQuests.length; index++) ...[
+          _StoryQuestCard(
+            controller: controller,
+            quest: builtInStoryQuests[index],
+            index: index,
+          ),
+          const SizedBox(height: 10),
+        ],
+      ],
+    );
+  }
+}
 
-    return Material(
-      color: Theme.of(context).colorScheme.surfaceContainer,
-      borderRadius: BorderRadius.circular(8),
-      child: Padding(
-        padding: const EdgeInsets.all(14),
-        child: Row(
-          children: [
-            Container(
-              width: 42,
-              height: 42,
-              decoration: BoxDecoration(
-                color: claimed
-                    ? const Color(0xFFE1EFEA)
-                    : const Color(0xFFFFF0C7),
-                borderRadius: BorderRadius.circular(7),
-              ),
-              child: Icon(
-                claimed ? Icons.check_rounded : Icons.auto_awesome,
-                color: claimed
-                    ? const Color(0xFF2D796A)
-                    : const Color(0xFFB57012),
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+class _StoryQuestCard extends StatelessWidget {
+  const _StoryQuestCard({
+    required this.controller,
+    required this.quest,
+    required this.index,
+  });
+
+  final AppController controller;
+  final StoryQuestDefinition quest;
+  final int index;
+
+  @override
+  Widget build(BuildContext context) {
+    final language = controller.interfaceLanguage;
+    final colorScheme = Theme.of(context).colorScheme;
+    final claimed = index < controller.storyQuestIndex;
+    final active = index == controller.storyQuestIndex;
+    final locked = index > controller.storyQuestIndex;
+    final progress = controller.storyQuestProgress(quest);
+    final complete = active && controller.isStoryQuestComplete(quest);
+    final status = claimed
+        ? language.text('已完成', 'Complete', '完了')
+        : locked
+        ? language.text('未解锁', 'Locked', '未解放')
+        : complete
+        ? language.text('可领取', 'Ready', '受取可能')
+        : language.text('进行中', 'Active', '進行中');
+    return Opacity(
+      opacity: locked ? 0.58 : 1,
+      child: GlassSurface(
+        liquidGlass: controller.liquidGlassChatUi,
+        tone: Theme.of(context).brightness == Brightness.dark
+            ? GlassTone.dark
+            : GlassTone.light,
+        borderRadius: BorderRadius.circular(8),
+        fallbackColor: colorScheme.surfaceContainer.withValues(alpha: 0.66),
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
                 children: [
-                  Text(
-                    _missionTitle(mission.id, controller.interfaceLanguage),
-                    style: const TextStyle(fontWeight: FontWeight.w700),
+                  CircleAvatar(
+                    radius: 17,
+                    backgroundColor: claimed
+                        ? const Color(0xFF4F8B78)
+                        : active
+                        ? colorScheme.primary
+                        : colorScheme.surfaceContainerHighest,
+                    foregroundColor: claimed || active
+                        ? colorScheme.onPrimary
+                        : colorScheme.onSurfaceVariant,
+                    child: claimed
+                        ? const Icon(Icons.check_rounded, size: 20)
+                        : locked
+                        ? const Icon(Icons.lock_outline_rounded, size: 18)
+                        : Text('${index + 1}'),
                   ),
-                  const SizedBox(height: 2),
-                  Text(
-                    _missionDescription(
-                      mission.id,
-                      controller.interfaceLanguage,
-                    ),
-                    style: TextStyle(
-                      color: Theme.of(context).colorScheme.onSurfaceVariant,
-                      fontSize: 13,
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      quest.title(language),
+                      style: const TextStyle(fontWeight: FontWeight.w700),
                     ),
                   ),
-                  const SizedBox(height: 7),
                   Text(
-                    controller.interfaceLanguage.text(
-                      '$progress / ${mission.target}  ·  奖励 ${mission.reward} 星',
-                      '$progress / ${mission.target}  ·  ${mission.reward} stars',
-                      '$progress / ${mission.target}  ·  ${mission.reward}スター',
-                    ),
+                    status,
                     style: TextStyle(
+                      color: colorScheme.onSurfaceVariant,
                       fontSize: 12,
-                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      fontWeight: FontWeight.w600,
                     ),
                   ),
                 ],
               ),
-            ),
-            const SizedBox(width: 8),
-            if (claimed)
-              const Icon(Icons.verified_rounded, color: Color(0xFF2D796A))
-            else
-              FilledButton.tonal(
-                onPressed: complete
-                    ? () {
-                        controller.claimMission(mission);
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content: Text(
-                              controller.interfaceLanguage.text(
-                                '获得 ${mission.reward} 星',
-                                'Earned ${mission.reward} stars',
-                                '${mission.reward}スターを獲得',
-                              ),
-                            ),
-                          ),
-                        );
-                      }
-                    : null,
-                child: Text(
-                  controller.interfaceLanguage.text('领取', 'Claim', '受け取る'),
-                ),
+              const SizedBox(height: 8),
+              Text(
+                quest.description(language),
+                style: TextStyle(color: colorScheme.onSurfaceVariant),
               ),
+              const SizedBox(height: 12),
+              LinearProgressIndicator(
+                value: locked ? 0 : progress / quest.target,
+                minHeight: 6,
+                borderRadius: BorderRadius.circular(3),
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(
+                    child: Wrap(
+                      spacing: 8,
+                      runSpacing: 4,
+                      children: [
+                        Text(
+                          '${quest.objectiveType.label(language)}  $progress / ${quest.target}',
+                          style: const TextStyle(fontSize: 12),
+                        ),
+                        Text(
+                          language.text(
+                            '奖励 ${quest.reward} 星',
+                            '${quest.reward} stars',
+                            '報酬 ${quest.reward} スター',
+                          ),
+                          style: const TextStyle(fontSize: 12),
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (active)
+                    FilledButton.tonalIcon(
+                      onPressed: complete
+                          ? () {
+                              if (!controller.claimStoryQuest(quest.id)) return;
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text(
+                                    language.text(
+                                      '主线推进，获得 ${quest.reward} 星',
+                                      'Story advanced. Earned ${quest.reward} stars',
+                                      'メイン進行。${quest.reward} スターを獲得',
+                                    ),
+                                  ),
+                                ),
+                              );
+                            }
+                          : null,
+                      icon: const Icon(Icons.star_rounded),
+                      label: Text(language.text('完成', 'Complete', '完了')),
+                    ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _DynamicQuestList extends StatelessWidget {
+  const _DynamicQuestList({required this.controller});
+
+  final AppController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final language = controller.interfaceLanguage;
+    final quests = controller.dynamicQuests;
+    final unclaimed = quests.where((quest) => !quest.isClaimed).length;
+    if (quests.isEmpty) return _EmptyQuestState(language: language);
+    return ListView(
+      key: const PageStorageKey('dynamic-quests'),
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+      children: [
+        Text(
+          language.text(
+            '进行中 $unclaimed / ${AppController.maxActiveDynamicQuests}',
+            'Active $unclaimed / ${AppController.maxActiveDynamicQuests}',
+            '進行中 $unclaimed / ${AppController.maxActiveDynamicQuests}',
+          ),
+          style: Theme.of(context).textTheme.titleMedium,
+        ),
+        const SizedBox(height: 12),
+        for (final quest in quests) ...[
+          _DynamicQuestCard(controller: controller, quest: quest),
+          const SizedBox(height: 10),
+        ],
+      ],
+    );
+  }
+}
+
+class _EmptyQuestState extends StatelessWidget {
+  const _EmptyQuestState({required this.language});
+
+  final AppLanguage language;
+
+  @override
+  Widget build(BuildContext context) => Center(
+    child: Padding(
+      padding: const EdgeInsets.all(32),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            Icons.assignment_outlined,
+            size: 56,
+            color: Theme.of(context).colorScheme.onSurfaceVariant,
+          ),
+          const SizedBox(height: 14),
+          Text(
+            language.text('还没有莱莎委托', 'No Ryza quests yet', 'ライザの依頼はまだありません'),
+            style: Theme.of(context).textTheme.titleLarge,
+          ),
+          const SizedBox(height: 8),
+          Text(
+            language.text(
+              '回到聊天并请莱莎想一个任务。采集、调合、旅行或交流会自动记录进度。',
+              'Ask Ryza to create a quest in chat. Gathering, synthesis, travel, and conversation update it automatically.',
+              '会話に戻り、ライザに依頼を考えてもらいましょう。採取・調合・移動・会話で進行します。',
+            ),
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+class _DynamicQuestCard extends StatelessWidget {
+  const _DynamicQuestCard({required this.controller, required this.quest});
+
+  final AppController controller;
+  final DynamicQuest quest;
+
+  Future<void> _confirmRemove(BuildContext context) async {
+    final language = controller.interfaceLanguage;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(language.text('放弃任务？', 'Abandon quest?', 'クエストを破棄しますか？')),
+        content: Text(quest.title),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: Text(language.text('取消', 'Cancel', 'キャンセル')),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: Text(language.text('放弃', 'Abandon', '破棄')),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) controller.removeDynamicQuest(quest.id);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final language = controller.interfaceLanguage;
+    final progress = controller.questProgress(quest);
+    final complete = controller.isDynamicQuestComplete(quest);
+    final claimed = quest.isClaimed;
+    final colorScheme = Theme.of(context).colorScheme;
+    final status = claimed
+        ? language.text('已领取', 'Claimed', '受取済み')
+        : complete
+        ? language.text('可领取', 'Ready', '受取可能')
+        : language.text('进行中', 'Active', '進行中');
+    return GlassSurface(
+      liquidGlass: controller.liquidGlassChatUi,
+      tone: Theme.of(context).brightness == Brightness.dark
+          ? GlassTone.dark
+          : GlassTone.light,
+      borderRadius: BorderRadius.circular(8),
+      fallbackColor: colorScheme.surfaceContainer.withValues(alpha: 0.66),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  claimed ? Icons.task_alt_rounded : Icons.assignment_outlined,
+                  color: claimed
+                      ? const Color(0xFF4F8B78)
+                      : colorScheme.primary,
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    quest.title,
+                    style: const TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                ),
+                Text(
+                  status,
+                  style: TextStyle(
+                    color: claimed
+                        ? const Color(0xFF4F8B78)
+                        : colorScheme.onSurfaceVariant,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Text(
+              quest.description,
+              style: TextStyle(color: colorScheme.onSurfaceVariant),
+            ),
+            const SizedBox(height: 12),
+            LinearProgressIndicator(
+              value: progress / quest.target,
+              minHeight: 6,
+              borderRadius: BorderRadius.circular(3),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 4,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                Text(
+                  '${quest.objectiveType.label(language)}  $progress / ${quest.target}',
+                  style: const TextStyle(fontSize: 12),
+                ),
+                Text(
+                  language.text(
+                    '奖励 ${quest.reward} 星',
+                    '${quest.reward} stars',
+                    '報酬 ${quest.reward} スター',
+                  ),
+                  style: const TextStyle(fontSize: 12),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                IconButton(
+                  onPressed: () => _confirmRemove(context),
+                  tooltip: language.text('放弃任务', 'Abandon quest', 'クエストを破棄'),
+                  icon: const Icon(Icons.delete_outline_rounded),
+                ),
+                if (!claimed)
+                  FilledButton.tonalIcon(
+                    onPressed: complete
+                        ? () {
+                            if (!controller.claimDynamicQuest(quest.id)) return;
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(
+                                  language.text(
+                                    '获得 ${quest.reward} 星',
+                                    'Earned ${quest.reward} stars',
+                                    '${quest.reward} スターを獲得',
+                                  ),
+                                ),
+                              ),
+                            );
+                          }
+                        : null,
+                    icon: const Icon(Icons.star_rounded),
+                    label: Text(language.text('领取', 'Claim', '受け取る')),
+                  ),
+              ],
+            ),
           ],
         ),
       ),
     );
   }
 }
-
-String _missionTitle(String id, AppLanguage language) => switch (id) {
-  'touch_character' => language.text('打个招呼', 'Say hello', 'あいさつする'),
-  'first_chat' => language.text('开始聊天', 'Start chatting', '会話を始める'),
-  'open_map' => language.text('查看世界', 'View the world', '世界を見る'),
-  'travel' => language.text('选择目的地', 'Choose a destination', '目的地を選ぶ'),
-  'scene_time' => language.text('改变时间', 'Change the time', '時間を変える'),
-  _ => id,
-};
-
-String _missionDescription(String id, AppLanguage language) => switch (id) {
-  'touch_character' => language.text(
-    '点击莱莎触发一次互动',
-    'Tap Ryza once',
-    'ライザをタップして交流する',
-  ),
-  'first_chat' => language.text(
-    '向莱莎发送第一条消息',
-    'Send Ryza your first message',
-    'ライザに最初のメッセージを送る',
-  ),
-  'open_map' => language.text('打开世界地图', 'Open the world map', 'ワールドマップを開く'),
-  'travel' => language.text(
-    '在地图中选择一个地点',
-    'Choose a location on the map',
-    'マップで場所を選ぶ',
-  ),
-  'scene_time' => language.text(
-    '手动切换一次场景时间',
-    'Change the scene time once',
-    'シーンの時間を変更する',
-  ),
-  _ => id,
-};

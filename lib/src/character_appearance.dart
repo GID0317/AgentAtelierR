@@ -4,6 +4,7 @@ import 'dart:math';
 import 'package:flutter/services.dart';
 
 import 'character_expression.dart';
+import 'protected_character_assets.dart';
 
 class CharacterAppearance {
   const CharacterAppearance({
@@ -14,6 +15,7 @@ class CharacterAppearance {
     required this.assetName,
     required this.animated,
     required this.idleAnimations,
+    this.hasPreview = true,
   });
 
   final String id;
@@ -23,6 +25,7 @@ class CharacterAppearance {
   final String assetName;
   final bool animated;
   final List<String> idleAnimations;
+  final bool hasPreview;
 
   String get previewAsset => 'assets/images/skins/$assetName.png';
   String get assetRoot => 'assets/character/ryza/$assetName';
@@ -168,9 +171,12 @@ String motionDisplayName(String animation) {
 }
 
 Future<List<CharacterMotionGroup>> loadCharacterMotionGroups(
-  CharacterAppearance appearance,
-) async {
-  final source = await rootBundle.loadString(appearance.gestureAsset);
+  CharacterAppearance appearance, {
+  AssetBundle? bundle,
+}) async {
+  final assets =
+      bundle ?? await ProtectedCharacterAssets.bundleFor(appearance.assetName);
+  final source = await assets.loadString(appearance.gestureAsset);
   return parseCharacterMotionGroups(source);
 }
 
@@ -358,13 +364,16 @@ CharacterMotionGroup? selectCharacterAmbientMotionGroup({
   bool authoredOnly = false,
   String sittingId = 'sitting_normal',
   String? poseType,
+  Map<String, double> groupWeights = const {},
 }) {
+  double weight(CharacterMotionGroup group) =>
+      groupWeights[group.id] ?? group.weightFor(expression, poseType: poseType);
   bool allowed(CharacterMotionGroup group) =>
       group.supportsPose(pose) &&
       group.supportsSitting(sittingId) &&
       group.occupiedTracks.isNotEmpty &&
       (allowLargePostureChanges || !group.occupancy.contains('C')) &&
-      (!authoredOnly || group.weightFor(expression, poseType: poseType) > 0);
+      (!authoredOnly || weight(group) > 0);
   var compatible = groups
       .where((group) => allowed(group) && !recentGroupIds.contains(group.id))
       .toList();
@@ -373,9 +382,7 @@ CharacterMotionGroup? selectCharacterAmbientMotionGroup({
   }
   if (compatible.isEmpty) return null;
 
-  final preferred = compatible
-      .where((group) => group.weightFor(expression, poseType: poseType) > 0)
-      .toList();
+  final preferred = compatible.where((group) => weight(group) > 0).toList();
   final explore =
       !authoredOnly &&
       (preferred.isEmpty || random.nextDouble() < explorationChance);
@@ -388,16 +395,11 @@ CharacterMotionGroup? selectCharacterAmbientMotionGroup({
   }
   final total = pool.fold<double>(
     0,
-    (sum, group) =>
-        sum +
-        group.weightFor(expression, poseType: poseType) /
-            variantsPerId[group.id]!,
+    (sum, group) => sum + weight(group) / variantsPerId[group.id]!,
   );
   var target = random.nextDouble() * total;
   for (final group in pool) {
-    target -=
-        group.weightFor(expression, poseType: poseType) /
-        variantsPerId[group.id]!;
+    target -= weight(group) / variantsPerId[group.id]!;
     if (target <= 0) return group;
   }
   return pool.last;

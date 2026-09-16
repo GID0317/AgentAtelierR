@@ -11,6 +11,7 @@ import 'package:path_provider/path_provider.dart';
 import 'app_controller.dart';
 import 'device_agent_tools.dart';
 import 'runtime_log.dart';
+import 'openai_configuration_slots.dart';
 
 part 'gemini_interactions.dart';
 
@@ -19,8 +20,41 @@ class SecretStore {
 
   static const _storage = FlutterSecureStorage(aOptions: AndroidOptions());
 
-  Future<String> readOpenAiKey() async =>
-      await _storage.read(key: 'openai_api_key') ?? '';
+  Future<Map<String, String>> _readOpenAiSlotKeys() async {
+    final raw = await _storage.read(key: 'openai_slot_keys_v1');
+    if (raw == null) {
+      return {'0': await _storage.read(key: 'openai_api_key') ?? ''};
+    }
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) throw const FormatException();
+      return {
+        for (var i = 0; i < OpenAiConfigurationSlots.count; i++)
+          '$i': decoded['$i'] is String ? decoded['$i'] as String : '',
+      };
+    } on FormatException {
+      // Do not include the secure payload in an error or runtime log.
+      throw StateError('Cannot read stored OpenAI configuration keys');
+    }
+  }
+
+  Future<String> readOpenAiKey({int slot = 0}) async {
+    OpenAiConfigurationSlots.checkIndex(slot);
+    return (await _readOpenAiSlotKeys())['$slot'] ?? '';
+  }
+
+  Future<void> writeOpenAiSlotKeys(Map<int, String> updates) async {
+    for (final slot in updates.keys) {
+      OpenAiConfigurationSlots.checkIndex(slot);
+    }
+    if (updates.isEmpty) return;
+    final keys = await _readOpenAiSlotKeys();
+    for (final update in updates.entries) {
+      keys['${update.key}'] = update.value.trim();
+    }
+    // One secure write prevents partially saving keys across several slots.
+    await _storage.write(key: 'openai_slot_keys_v1', value: jsonEncode(keys));
+  }
 
   Future<String> readGeminiKey() async =>
       await _storage.read(key: 'gemini_api_key') ?? '';
@@ -40,16 +74,16 @@ class SecretStore {
   Future<void> writeMimoTtsKey(String value) =>
       _writeOrDelete('mimo_tts_api_key', value);
 
-  Future<void> writeOpenAiKey(String value) =>
-      _writeOrDelete('openai_api_key', value);
+  Future<void> writeOpenAiKey(String value) => writeOpenAiSlotKeys({0: value});
 
   Future<void> writeGeminiKey(String value) =>
       _writeOrDelete('gemini_api_key', value);
 
-  Future<String> readLlmKey(LlmProvider provider) => switch (provider) {
-    LlmProvider.openAiCompatible => readOpenAiKey(),
-    LlmProvider.gemini => readGeminiKey(),
-  };
+  Future<String> readLlmKey(LlmProvider provider, {int openAiSlot = 0}) =>
+      switch (provider) {
+        LlmProvider.openAiCompatible => readOpenAiKey(slot: openAiSlot),
+        LlmProvider.gemini => readGeminiKey(),
+      };
 
   Future<void> writeFishAudioKey(String value) =>
       _writeOrDelete('fish_audio_api_key', value);
@@ -97,6 +131,30 @@ class OpenAiCompatibleClient {
   final AgentToolExecutor? _agentToolExecutor;
   final AgentToolExecutor? contextToolExecutor;
 
+  Map<String, String> _openAiHeaders(String apiKey, {bool stream = false}) {
+    final normalizedKey = apiKey.trim();
+    if (normalizedKey.isEmpty) {
+      throw AiServiceException('OpenAI 兼容接口 API Key 为空，请先在设置中填写。');
+    }
+    return {
+      'Authorization': 'Bearer $normalizedKey',
+      'Content-Type': 'application/json',
+      if (stream) 'Accept': 'text/event-stream',
+    };
+  }
+
+  Map<String, dynamic> _loggedRequest(
+    Map<String, dynamic> body, {
+    required bool stream,
+  }) => {
+    'headers': {
+      'Authorization': 'Bearer [REDACTED]',
+      'Content-Type': 'application/json',
+      if (stream) 'Accept': 'text/event-stream',
+    },
+    'body': body,
+  };
+
   // User-authored settings, history, and attachment contents are data only.
   // Keep this short: it is sent on every turn and must not compete with the
   // character/output contracts assembled by AppController.
@@ -122,6 +180,15 @@ class OpenAiCompatibleClient {
             },
           },
         },
+    if (contextToolExecutor != null) ...[
+      _inspectQuestsTool,
+      _createQuestTool,
+      _inspectAlchemyInventoryTool,
+      _gatherCurrentLocationTool,
+      _synthesizeCustomItemTool,
+      _inspectMapLocationsTool,
+      _travelToStageTool,
+    ],
     _webSearchTool,
     if (_agentToolExecutor != null) ...[
       _currentLocationTool,
@@ -146,7 +213,7 @@ class OpenAiCompatibleClient {
       {
         'role': 'system',
         'content': agentEnabled
-            ? '$systemPrompt\n\n$_untrustedDataNotice\n你可以按需使用工具。需要实时或不确定的网络信息时调用 web_search，并在相关事实后保留来源 URL。只有用户的问题确实依赖当前位置、周边服务或设备应用选择时，才能调用相应设备工具；调用定位可能触发系统权限弹窗，用户拒绝后不得猜测位置或反复申请。应用列表仅用于推荐，不得声称已经打开、操作或检查了其他应用。优先并行调用互不依赖的工具，避免重复调用。'
+            ? '$systemPrompt\n\n$_untrustedDataNotice\n你可以按需使用工具。需要实时或不确定的网络信息时调用 web_search，并在相关事实后保留来源 URL。任务是本地状态：用户询问任务时先调用 inspect_quests；只有用户主动要求一个任务，或明确接受莱莎刚提出的任务后，才能调用 create_quest，并正确填写 authorization。莱莎可以先用角色口吻提出任务构想，但在用户接受前不得创建；工具失败时不得声称任务已经写入。采集和调合也是本地状态操作：不得只用文字宣称成功，必须使用对应工具并以工具返回为准。采集时由你结合当前地图和剧情提出合理的 discoveries，允许发现内置清单外的新素材；不要指定数量或品质。调合前先查背包，再决定成品和真实素材实例。莱莎可以在用户明确要求移动，或当前对话自然需要去另一地点时自主决定切换地图：先调用 inspect_map_locations 查出真实 stage_id，再调用 travel_to_stage；假设、回忆、仅讨论地点时不要切换，每轮最多切换一次。只有用户的问题确实依赖当前位置、周边服务或设备应用选择时，才能调用相应设备工具；调用定位可能触发系统权限弹窗，用户拒绝后不得猜测位置或反复申请。应用列表仅用于推荐，不得声称已经打开、操作或检查了其他应用。优先并行调用互不依赖的只读工具；创建任务、采集、旅行和调合等写入工具必须按流程顺序调用，避免重复执行。'
             : '$systemPrompt\n\n$_untrustedDataNotice',
       },
       for (final message in messages)
@@ -282,11 +349,7 @@ class OpenAiCompatibleClient {
   }) async* {
     final started = DateTime.now();
     final request = http.Request('POST', _endpoint(baseUrl, 'chat/completions'))
-      ..headers.addAll({
-        'Authorization': 'Bearer $apiKey',
-        'Content-Type': 'application/json',
-        'Accept': 'text/event-stream',
-      })
+      ..headers.addAll(_openAiHeaders(apiKey, stream: true))
       ..body = jsonEncode(body);
 
     final response = await _client.send(request);
@@ -295,7 +358,7 @@ class OpenAiCompatibleClient {
       direction: 'request',
       method: 'POST',
       url: request.url.toString(),
-      payload: body,
+      payload: _loggedRequest(body, stream: true),
     );
     RuntimeLog.instance.communication(
       source: 'LLM',
@@ -322,8 +385,13 @@ class OpenAiCompatibleClient {
             .transform(utf8.decoder)
             .transform(const LineSplitter())) {
       if (!line.startsWith('data:')) continue;
-      final data = line.substring(5).trim();
-      if (data.isEmpty || data == '[DONE]') continue;
+      final data = line
+          .substring(5)
+          .replaceAll('\uFEFF', '')
+          .replaceAll('\u0000', '')
+          .trim();
+      if (data.isEmpty) continue;
+      if (data.toUpperCase() == '[DONE]') break;
       final decoded = jsonDecode(data) as Map<String, dynamic>;
       final error = decoded['error'];
       if (error is Map<String, dynamic>) {
@@ -354,10 +422,7 @@ class OpenAiCompatibleClient {
     final url = _endpoint(baseUrl, 'chat/completions');
     final response = await _client.post(
       url,
-      headers: {
-        'Authorization': 'Bearer $apiKey',
-        'Content-Type': 'application/json',
-      },
+      headers: _openAiHeaders(apiKey),
       body: jsonEncode(body),
     );
     RuntimeLog.instance.communication(
@@ -365,7 +430,7 @@ class OpenAiCompatibleClient {
       direction: 'request',
       method: 'POST',
       url: url.toString(),
-      payload: body,
+      payload: _loggedRequest(body, stream: false),
     );
     RuntimeLog.instance.communication(
       source: 'LLM',
@@ -399,7 +464,15 @@ class OpenAiCompatibleClient {
       final arguments = jsonDecode(rawArguments) as Map<String, dynamic>;
       final started = DateTime.now();
       final output = switch (name) {
-        'lookup_character' || 'search_memory' =>
+        'lookup_character' ||
+        'search_memory' ||
+        'inspect_quests' ||
+        'create_quest' ||
+        'inspect_alchemy_inventory' ||
+        'gather_current_location' ||
+        'synthesize_custom_item' ||
+        'inspect_map_locations' ||
+        'travel_to_stage' =>
           contextToolExecutor == null
               ? '本地资料查询未启用。'
               : await contextToolExecutor!(name, arguments),
@@ -486,6 +559,209 @@ class OpenAiCompatibleClient {
           'query': {'type': 'string', 'description': '简洁、具体的搜索关键词'},
         },
         'required': ['query'],
+        'additionalProperties': false,
+      },
+    },
+  };
+
+  static const Map<String, dynamic> _inspectAlchemyInventoryTool = {
+    'type': 'function',
+    'function': {
+      'name': 'inspect_alchemy_inventory',
+      'description': '读取当前地图地点、采集场景状态、背包中真实物品实例 ID、数量、品质、分类和标签。调合前必须先调用。',
+      'parameters': {
+        'type': 'object',
+        'properties': <String, dynamic>{},
+        'additionalProperties': false,
+      },
+    },
+  };
+
+  static const Map<String, dynamic> _inspectQuestsTool = {
+    'type': 'function',
+    'function': {
+      'name': 'inspect_quests',
+      'description': '读取本地任务列表、目标、进度、奖励与领取状态。用户询问当前任务或准备新建任务时先调用。',
+      'parameters': {
+        'type': 'object',
+        'properties': <String, dynamic>{},
+        'additionalProperties': false,
+      },
+    },
+  };
+
+  static const Map<String, dynamic> _createQuestTool = {
+    'type': 'function',
+    'function': {
+      'name': 'create_quest',
+      'description': '把莱莎构思的任务写入本地任务列表。只有用户本轮主动要求任务，或明确接受莱莎此前提出的任务时调用；任务创建成功必须以工具返回为准。名称和描述使用当前界面语言，奖励由本地计算。',
+      'parameters': {
+        'type': 'object',
+        'properties': {
+          'title': {'type': 'string', 'description': '简洁的任务名称，1 至 48 字符'},
+          'description': {
+            'type': 'string',
+            'description': '清楚描述要做什么，1 至 240 字符',
+          },
+          'objective_type': {
+            'type': 'string',
+            'enum': ['gather', 'synthesize', 'travel', 'chat'],
+            'description': '可由本地计数验证的任务目标类型',
+          },
+          'target': {
+            'type': 'integer',
+            'minimum': 1,
+            'maximum': 10,
+            'description': '需要完成的次数',
+          },
+          'authorization': {
+            'type': 'string',
+            'enum': ['user_requested', 'user_accepted'],
+            'description': '用户本轮主动要求任务，或明确接受了莱莎此前的任务提议',
+          },
+        },
+        'required': [
+          'title',
+          'description',
+          'objective_type',
+          'target',
+          'authorization',
+        ],
+        'additionalProperties': false,
+      },
+    },
+  };
+
+  static const Map<String, dynamic> _gatherCurrentLocationTool = {
+    'type': 'function',
+    'function': {
+      'name': 'gather_current_location',
+      'description': '在莱莎和用户已通过世界地图进入的当前场景执行一次采集，并将结果写入背包。先结合地图、季节感和对话，在 discoveries 中提出 1 至 3 种合理素材；允许使用内置清单外的新名称。程序会随机决定每种数量和品质。只有用户提出采集，或莱莎结合当前对话明确决定采集时使用；不要重复调用。',
+      'parameters': {
+        'type': 'object',
+        'properties': {
+          'discoveries': {
+            'type': 'array',
+            'description': '本次场景中实际发现的素材。不要放成品、数量或品质。',
+            'minItems': 1,
+            'maxItems': 3,
+            'items': {
+              'type': 'object',
+              'properties': {
+                'name': {'type': 'string', 'description': '简短的素材名称，允许清单外的新素材'},
+                'description': {
+                  'type': 'string',
+                  'description': '素材外观、触感、气味或炼金性质的简短描述',
+                },
+                'categories': {
+                  'type': 'array',
+                  'description': '一个或多个语义分类；适用时优先使用 explosive、fuel、water、plant、ore、stone、catalyst，其他类别可自由命名',
+                  'items': {'type': 'string'},
+                  'minItems': 1,
+                  'maxItems': 6,
+                },
+                'suggested_trait_ids': {
+                  'type': 'array',
+                  'description': '可选的建议特性；最终特性数量由本地品质规则决定',
+                  'items': {
+                    'type': 'string',
+                    'enum': [
+                      'high_price',
+                      'cheap',
+                      'durable',
+                      'fragile',
+                      'fire',
+                      'cooling',
+                      'healing',
+                      'stable',
+                      'unstable',
+                    ],
+                  },
+                  'maxItems': 4,
+                },
+              },
+              'required': ['name', 'description', 'categories'],
+              'additionalProperties': false,
+            },
+          },
+        },
+        'required': ['discoveries'],
+        'additionalProperties': false,
+      },
+    },
+  };
+
+  static const Map<String, dynamic> _synthesizeCustomItemTool = {
+    'type': 'function',
+    'function': {
+      'name': 'synthesize_custom_item',
+      'description': '根据用户需求、场景和素材性质自行设计一次配方，并消耗指定的真实背包实例进行调合。应用没有固定配方清单；每次都由莱莎决定成品名称、描述、分类、预期效果和选材，可以还原作品中的幻想道具或创作游戏外用途的幻想炼金成品。name、description、category 必须使用系统提示中指定的当前界面语言；品质、标签和消耗由工具计算，不能指定或伪造。',
+      'parameters': {
+        'type': 'object',
+        'properties': {
+          'name': {'type': 'string', 'description': '当前界面语言的成品名称，1 至 40 字符'},
+          'description': {
+            'type': 'string',
+            'description': '使用当前界面语言描述明确属于幻想炼金的成品外观与用途',
+          },
+          'ingredient_instance_ids': {
+            'type': 'array',
+            'description': '从 inspect_alchemy_inventory 返回中选取的 1 至 6 个实例 ID；同一堆叠可重复 ID 以消耗多份',
+            'items': {'type': 'string'},
+            'minItems': 1,
+            'maxItems': 6,
+          },
+          'category': {
+            'type': 'string',
+            'description': '当前界面语言的可选成品分类，例如恢复道具、旅行工具或生活用品',
+          },
+          'intended_effect': {
+            'type': 'string',
+            'description': '使用当前界面语言填写可选的预期效果，必须与所选素材性质相符',
+          },
+          'catalyst_instance_id': {
+            'type': 'string',
+            'description': '可选的调和剂实例 ID',
+          },
+        },
+        'required': ['name', 'description', 'ingredient_instance_ids'],
+        'additionalProperties': false,
+      },
+    },
+  };
+
+  static const Map<String, dynamic> _inspectMapLocationsTool = {
+    'type': 'function',
+    'function': {
+      'name': 'inspect_map_locations',
+      'description': '查询真实世界地图地点及可用于旅行的 stage_id。莱莎准备自主旅行或用户要求前往某处时必须先调用；query 可填地区或地点名，留空则返回当前区域。',
+      'parameters': {
+        'type': 'object',
+        'properties': {
+          'query': {
+            'type': 'string',
+            'description': '可选的地区、地区组或地点关键词，最多 80 字符',
+          },
+        },
+        'additionalProperties': false,
+      },
+    },
+  };
+
+  static const Map<String, dynamic> _travelToStageTool = {
+    'type': 'function',
+    'function': {
+      'name': 'travel_to_stage',
+      'description': '实际切换应用当前地图，并联动聊天背景、环境音和背景音乐。仅在用户明确要求移动，或莱莎根据当前对话自然决定出发时调用；stage_id 必须来自本轮 inspect_map_locations，假设或仅提到地点时不要调用。',
+      'parameters': {
+        'type': 'object',
+        'properties': {
+          'stage_id': {
+            'type': 'string',
+            'description': 'inspect_map_locations 返回的精确 stage_id',
+          },
+        },
+        'required': ['stage_id'],
         'additionalProperties': false,
       },
     },
@@ -601,10 +877,7 @@ class OpenAiCompatibleClient {
     final requestBody = {'model': model, 'stream': false, 'messages': messages};
     final response = await _client.post(
       url,
-      headers: {
-        'Authorization': 'Bearer $apiKey',
-        'Content-Type': 'application/json',
-      },
+      headers: _openAiHeaders(apiKey),
       body: jsonEncode(requestBody),
     );
     RuntimeLog.instance.communication(
@@ -612,7 +885,7 @@ class OpenAiCompatibleClient {
       direction: 'request',
       method: 'POST',
       url: url.toString(),
-      payload: requestBody,
+      payload: _loggedRequest(requestBody, stream: false),
     );
     RuntimeLog.instance.communication(
       source: 'LLM',

@@ -4,6 +4,37 @@ import 'package:ryza_chat_mvp/src/character_camera.dart';
 import 'package:ryza_chat_mvp/src/character_gaze.dart';
 
 void main() {
+  testWidgets('shared scene retains layout and hit coordinates after resize', (
+    tester,
+  ) async {
+    final key = GlobalKey();
+    final targets = <Offset>[];
+    Widget scene(double width, double height) => MaterialApp(
+      home: Align(
+        alignment: Alignment.topLeft,
+        child: SizedBox(
+          width: width,
+          height: height,
+          child: CharacterCamera(
+            keepSceneProportions: true,
+            initialScale: 1,
+            initialVerticalOffsetFraction: 0,
+            onTap: targets.add,
+            child: SizedBox.expand(key: key),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpWidget(scene(400, 600));
+    await tester.pumpWidget(scene(200, 300));
+    expect(tester.getSize(find.byKey(key)), const Size(400, 600));
+    await tester.tapAt(const Offset(100, 150));
+    expect(targets.last, const Offset(200, 300));
+    await tester.pumpWidget(scene(400, 600));
+    await tester.tapAt(const Offset(200, 300));
+    expect(targets.last, const Offset(200, 300));
+  });
+
   testWidgets('press and drag use camera coordinates; release ends gaze', (
     tester,
   ) async {

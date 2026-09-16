@@ -276,7 +276,7 @@ void main() {
     final exported = controller.exportData();
     expect(jsonEncode(exported), isNot(contains('/private/reference.wav')));
     final restored = await AppController.load();
-    restored.importData(exported);
+    await restored.importData(exported);
     expect(restored.mimoTts.referencePath, isEmpty);
     expect(restored.mimoTts.validationError, isNotNull);
     expect(

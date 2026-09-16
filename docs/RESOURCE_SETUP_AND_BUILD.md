@@ -48,7 +48,7 @@ assets/character/ryza/crf_skn_002_0001_99/crf_skn_002_0001_99.png
 assets/character/ryza/crf_skn_002_0001_99/crf_skn_002_0001_99_gesture.json
 ```
 
-服装 `crf_skn_002_0002_01`、`crf_skn_002_0003_01`、`crf_skn_002_0004_01` 在当前代码中只有候选入口，没有完整模型。若要启用，每套也必须提供同名 `.skel/.atlas/.png/_gesture.json` 四件套，并在 `lib/src/character_appearance.dart` 中将对应条目的 `animated` 设为 `true`。启用前必须确认骨骼、图集、纹理和动作映射属于同一套导出物。
+当前代码支持六套角色入口（`0001_01`、`0001_99`、`0002_01`、`0003_01`、`0004_01`、`0005_01`），但本仓库不提供这些模型。每套须在 `assets/character/ryza/<assetName>/` 提供同名 `.skel/.atlas/.png/_gesture.json` 文件，且必须来自同一套导出物。完整本地文件名见 [LOCAL_RESOURCE_MANIFEST.md](LOCAL_RESOURCE_MANIFEST.md)。预览图可缺省，不要用图集纹理冒充预览。
 
 这些历史兼容文件名可能指向第三方 IP。公开发行时，推荐改成自己的角色 ID，例如 `assets/character/custom/default/`，并同步替换角色名称、提示词和 UI 文案。
 
@@ -197,7 +197,7 @@ OpenAI 兼容接口和 Fish Audio Key 通过应用设置页填写，由平台安
 flutter pub get
 flutter analyze
 flutter test
-flutter build apk --debug
+powershell -ExecutionPolicy Bypass -File .\tool\build_protected.ps1 -Target apk -Mode debug
 ```
 
 Debug APK 默认输出到 `build/app/outputs/flutter-apk/app-debug.apk`。
@@ -210,7 +210,7 @@ Debug APK 默认输出到 `build/app/outputs/flutter-apk/app-debug.apk`。
 ```powershell
 flutter create --platforms=windows .
 flutter pub get
-flutter build windows --release
+powershell -ExecutionPolicy Bypass -File .\tool\build_protected.ps1 -Target windows -Mode release
 ```
 
 如果 MSVC 报错提示 `permission_handler_windows` 使用已弃用的 experimental coroutine 头文件，
@@ -257,7 +257,7 @@ Windows 滑块使用不依赖 OverlayPortal 的兼容实现；Android 保留 Mat
 5. Spine 套装必须保持 skel、atlas、纹理、gesture JSON 同源且版本兼容。先核对 Spine 4.2 Runtime 兼容性，再解析 atlas 和动作名，最后接入动作、表情、点击区域与服装切换。不得混用不同套装的骨骼或纹理；只有四件套齐全并验证通过后，才把对应 CharacterAppearance 的 animated 设为 true。
 6. 音频逐类验证：TTS、点击语音、BGM、环境音、音效、闹钟。不得未经授权克隆角色或演员声音。
 7. 资源缺失时保留明确的降级 UI，不伪造成功，不使用网络上的相似素材代替。
-8. 完成后依次运行 flutter pub get、flutter analyze、flutter test、flutter build apk --debug。
+8. 完成后依次运行 flutter pub get、flutter analyze、flutter test，再通过 tool/build_protected.ps1 -Target apk -Mode debug 加密打包。不要直接运行 flutter build；密钥、加密资源包及 APK 都只能留在本地。验证 APK 中不存在明文角色资源。
 9. 检查 APK 路径和大小，启动模拟器验证主界面、聊天、动作映射、换装、音频、附件、用户设定、设置和闹钟。
 10. 最终报告必须列出：接入文件、许可确认依据、修改代码、测试结果、APK 路径、仍缺失资源和未验证风险。不得在报告中泄露密钥。
 

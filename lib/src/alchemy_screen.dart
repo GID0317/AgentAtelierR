@@ -1,0 +1,169 @@
+import 'package:flutter/material.dart';
+
+import 'alchemy_models.dart';
+import 'app_controller.dart';
+import 'app_localization.dart';
+import 'glass_ui.dart';
+
+class AlchemyScreen extends StatefulWidget {
+  const AlchemyScreen({super.key, required this.controller});
+
+  final AppController controller;
+
+  @override
+  State<AlchemyScreen> createState() => _AlchemyScreenState();
+}
+
+class _AlchemyScreenState extends State<AlchemyScreen> {
+  @override
+  Widget build(BuildContext context) {
+    final language = widget.controller.interfaceLanguage;
+    return DefaultTabController(
+      length: 2,
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        appBar: AppBar(
+          automaticallyImplyLeading: false,
+          title: Padding(
+            padding: const EdgeInsets.only(left: 58),
+            child: Text(language.text('炼金工房', 'Atelier', 'アトリエ')),
+          ),
+          bottom: TabBar(
+            tabs: [
+              Tab(text: language.text('背包', 'Inventory', 'コンテナ')),
+              Tab(text: language.text('记录', 'History', '履歴')),
+            ],
+          ),
+        ),
+        body: GlassSurface(
+          liquidGlass: widget.controller.liquidGlassChatUi,
+          tone: Theme.of(context).brightness == Brightness.dark
+              ? GlassTone.dark
+              : GlassTone.light,
+          borderRadius: BorderRadius.zero,
+          fallbackColor: Theme.of(context).brightness == Brightness.dark
+              ? const Color(0xD91C2222)
+              : const Color(0xB8EEF2F0),
+          child: TabBarView(
+            children: [_buildInventory(language), _buildHistory(language)],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildInventory(AppLanguage language) {
+    final items = widget.controller.alchemyState.inventory.toList()
+      ..sort((a, b) => b.acquiredAt.compareTo(a.acquiredAt));
+    if (items.isEmpty) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: _EmptyInventoryNotice(language: language),
+        ),
+      );
+    }
+    return ListView.separated(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+      itemCount: items.length + 1,
+      separatorBuilder: (_, _) => const Divider(height: 1),
+      itemBuilder: (context, index) {
+        if (index == 0) {
+          return ListTile(
+            leading: const Icon(Icons.inventory_2_outlined),
+            title: Text(language.text('当前库存', 'Inventory', 'コンテナ')),
+            subtitle: Text(
+              language.text(
+                '在聊天中告诉莱莎想制作什么，配方与选材由她根据真实库存决定。',
+                'Tell Ryza what to make in chat. She decides the recipe and ingredients from the real inventory.',
+                'チャットで作りたい物を伝えると、ライザが実際の在庫からレシピと素材を決めます。',
+              ),
+            ),
+            trailing: Text(
+              '${items.fold<int>(0, (sum, item) => sum + item.quantity)}',
+            ),
+          );
+        }
+        final item = items[index - 1];
+        final tags = _tagNames(item).join('、');
+        return ListTile(
+          title: Text('${item.displayNameFor(language)} × ${item.quantity}'),
+          subtitle: Text(
+            '${language.text('品质', 'Quality', '品質')} '
+            '${item.qualityRank}（${item.quality}）\n'
+            '${language.text('标签', 'Traits', '特性')}：'
+            '${tags.isEmpty ? language.text('无', 'None', 'なし') : tags}'
+            '${item.descriptionFor(language).isEmpty ? '' : '\n${item.descriptionFor(language)}'}',
+          ),
+          isThreeLine: true,
+        );
+      },
+    );
+  }
+
+  Widget _buildHistory(AppLanguage language) {
+    final history = widget.controller.alchemyState.history;
+    if (history.isEmpty) {
+      return Center(
+        child: Text(
+          language.text('还没有调合记录', 'No synthesis history', '調合履歴はありません'),
+        ),
+      );
+    }
+    return ListView.separated(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+      itemCount: history.length,
+      separatorBuilder: (_, _) => const Divider(height: 1),
+      itemBuilder: (context, index) {
+        final entry = history[index];
+        return ListTile(
+          leading: const Icon(Icons.history_rounded),
+          title: Text(entry.result.displayNameFor(language)),
+          subtitle: Text(
+            '${language.text('品质', 'Quality', '品質')} '
+            '${entry.result.qualityRank}（${entry.result.quality}） · '
+            '${_tagNames(entry.result).join('、')}\n${_formatTime(entry.createdAt)}',
+          ),
+          isThreeLine: true,
+        );
+      },
+    );
+  }
+
+  List<String> _tagNames(AlchemyItem item) => item.tagIds
+      .map((id) => AlchemyCatalog.tags[id]?.name)
+      .whereType<String>()
+      .toList(growable: false);
+
+  String _formatTime(DateTime value) =>
+      '${value.year}-${value.month.toString().padLeft(2, '0')}-${value.day.toString().padLeft(2, '0')} '
+      '${value.hour.toString().padLeft(2, '0')}:${value.minute.toString().padLeft(2, '0')}';
+}
+
+class _EmptyInventoryNotice extends StatelessWidget {
+  const _EmptyInventoryNotice({required this.language});
+
+  final AppLanguage language;
+
+  @override
+  Widget build(BuildContext context) => Card(
+    child: Padding(
+      padding: const EdgeInsets.all(16),
+      child: Row(
+        children: [
+          const Icon(Icons.map_outlined),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              language.text(
+                '背包是空的。请先在世界地图进入具体场景，再回到对话中和莱莎一起采集；调合配方由莱莎根据实际素材决定。',
+                'The inventory is empty. Enter a location from the world map, then gather through conversation with Ryza. She will design recipes from the materials you actually collect.',
+                'コンテナは空です。ワールドマップから場所に入り、ライザとの会話で採取してください。調合レシピは集めた素材からライザが考えます。',
+              ),
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}

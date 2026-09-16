@@ -47,7 +47,7 @@ From the Flutter project directory, with Visual Studio C++ tools and NuGet on PA
 ```powershell
 flutter analyze
 flutter test
-flutter build windows --release
+powershell -ExecutionPolicy Bypass -File .\tool\build_protected.ps1 -Target windows -Mode release
 ```
 
 Run `build/windows/x64/runner/Release/ryza_chat_mvp.exe` in place. Distribution

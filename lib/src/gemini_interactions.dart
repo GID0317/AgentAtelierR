@@ -1,5 +1,23 @@
 part of 'ai_services.dart';
 
+// SSE frames may span network chunks and may end at EOF without a blank line.
+Stream<String> _geminiSseData(Stream<List<int>> bytes) async* {
+  var data = <String>[];
+  await for (final rawLine
+      in bytes.transform(utf8.decoder).transform(const LineSplitter())) {
+    final line = rawLine.replaceAll('\uFEFF', '').replaceAll('\u0000', '');
+    if (line.startsWith('data:')) {
+      data.add(line.substring(5).trimLeft());
+    } else if (line.trim().isEmpty && data.isNotEmpty) {
+      final payload = data.join('\n').trim();
+      data = [];
+      if (payload.isNotEmpty) yield payload;
+    }
+  }
+  final payload = data.join('\n').trim();
+  if (payload.isNotEmpty) yield payload;
+}
+
 // Native Interactions schema, verified against googleapis/python-genai _gaos.
 extension _GeminiInteractions on OpenAiCompatibleClient {
   Uri _geminiEndpoint(String baseUrl) {
@@ -202,24 +220,21 @@ extension _GeminiInteractions on OpenAiCompatibleClient {
       }
       var completed = false;
       final output = StringBuffer();
-      var eventData = <String>[];
-      await for (final line
-          in response.stream
-              .transform(utf8.decoder)
-              .transform(const LineSplitter())) {
-        if (line.startsWith('data:')) {
-          eventData.add(line.substring(5).trimLeft());
-          continue;
+      await for (final data in _geminiSseData(response.stream)) {
+        // Some servers append an OpenAI-style transport terminator, even on
+        // the native Interactions endpoint. It is not a JSON event.
+        if (data.toUpperCase() == '[DONE]') {
+          completed = true;
+          break;
         }
-        if (line.isNotEmpty || eventData.isEmpty) continue;
-        final event = jsonDecode(eventData.join('\n')) as Map<String, dynamic>;
-        eventData = [];
+        final event = jsonDecode(data) as Map<String, dynamic>;
         _geminiCheck(event);
         if (event['event_type'] == 'interaction.completed') {
           _geminiCheck(
             Map<String, dynamic>.from(event['interaction'] as Map? ?? {}),
           );
           completed = true;
+          break;
         }
         if (event['event_type'] == 'step.delta' ||
             event['event_type'] == 'content.delta') {

@@ -41,7 +41,7 @@ void main() {
         );
       }
       final restored = await AppController.load();
-      restored.importData(controller.exportData());
+      await restored.importData(controller.exportData());
       expect(restored.editableWorldSetting, '世界由浮空岛构成。');
       expect(restored.editableCharacterPersona, persona);
       restored.setWorldSetting(original);
@@ -63,7 +63,7 @@ void main() {
         expect(prompt, contains('[action:none]'));
       }
       final restored = await AppController.load();
-      restored.importData(controller.exportData());
+      await restored.importData(controller.exportData());
       expect(restored.characterPersona, '喜欢观察星空的炼金术士');
       restored.setCharacterPersona(original);
       expect(restored.characterPersona, isEmpty);
@@ -95,7 +95,7 @@ void main() {
       }
 
       final restored = await AppController.load();
-      restored.importData(controller.exportData());
+      await restored.importData(controller.exportData());
       expect(restored.characterPersonaInjectionEnabled, isFalse);
       expect(restored.worldSettingInjectionEnabled, isFalse);
     },
@@ -129,7 +129,7 @@ void main() {
       }
       final backup = controller.exportData();
       final restored = await AppController.load();
-      restored.importData(backup);
+      await restored.importData(backup);
       expect(restored.llmContextCompatibility, true);
     },
   );

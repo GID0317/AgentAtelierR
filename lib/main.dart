@@ -3,15 +3,27 @@ import 'dart:ui';
 import 'package:alarm/alarm.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart'
+    show LicenseRegistry, LicenseEntryWithLineBreaks;
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:spine_flutter/spine_flutter.dart' hide Color;
 
 import 'src/app_controller.dart';
 import 'src/app_localization.dart';
+import 'src/app_theme.dart';
 import 'src/app_shell.dart';
 import 'src/runtime_log.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  LicenseRegistry.addLicense(() async* {
+    yield LicenseEntryWithLineBreaks(
+      ['ryza-ai-revive'],
+      await rootBundle.loadString(
+        'docs/third_party/ryza-ai-revive-LICENSE.txt',
+      ),
+    );
+  });
   FlutterError.onError = (details) {
     RuntimeLog.instance.error(
       'Flutter',
@@ -47,7 +59,7 @@ class _BootstrapAppState extends State<_BootstrapApp> {
   Future<void> _initialize() async {
     try {
       await RuntimeLog.instance.initialize();
-      RuntimeLog.instance.info('App', '应用启动，版本 0.7.0+15');
+      RuntimeLog.instance.info('App', '应用启动，版本 1.0.0 正式版（构建 20）');
       await initSpineFlutter(enableMemoryDebugging: false);
       await Alarm.init();
       await AudioPlayer.global.setAudioContext(
@@ -61,12 +73,22 @@ class _BootstrapAppState extends State<_BootstrapApp> {
         ),
       );
       final controller = await AppController.load();
-      await Future<void>.delayed(const Duration(seconds: 3));
       if (mounted) setState(() => _controller = controller);
     } on Object catch (error, stackTrace) {
       RuntimeLog.instance.error('Startup', error, stackTrace);
       if (mounted) setState(() => _error = error);
     }
+  }
+
+  String _startupErrorMessage(Object error) {
+    final details = error.toString();
+    final asset = RegExp(r'''Unable to load asset:\s*["']?([^"'\s]+)''')
+        .firstMatch(details)
+        ?.group(1);
+    if (asset != null) {
+      return '必要资源缺失：$asset\n请按资源说明补齐文件后重新构建。';
+    }
+    return '初始化失败，请查看运行日志后重试。';
   }
 
   @override
@@ -77,23 +99,60 @@ class _BootstrapAppState extends State<_BootstrapApp> {
       debugShowCheckedModeBanner: false,
       home: ColoredBox(
         color: Colors.white,
-        child: SafeArea(
-          child: Center(
-            child: _error == null
-                ? Image.asset(
-                    'assets/branding/agent_atelier_logo.png',
-                    width: MediaQuery.sizeOf(context).width * 0.85,
-                    fit: BoxFit.contain,
-                  )
-                : TextButton.icon(
-                    onPressed: () {
-                      setState(() => _error = null);
-                      _initialize();
-                    },
-                    icon: const Icon(Icons.refresh_rounded),
-                    label: const Text('加载失败，点击重试'),
+        child: SizedBox.expand(
+          child: _error == null
+              ? Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    // Keep the logo above the startup backdrop while the app
+                    // finishes initializing in the background.
+                    const ColoredBox(color: Colors.white),
+                    const IgnorePointer(
+                      child: Center(
+                        child: FractionallySizedBox(
+                          widthFactor: 0.85,
+                          child: Image(
+                            image: AssetImage(
+                              'assets/branding/agent_atelier_logo.png',
+                            ),
+                            fit: BoxFit.contain,
+                            semanticLabel: 'AgentAtelierR',
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                )
+              : Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(
+                          Icons.error_outline_rounded,
+                          size: 40,
+                          color: Color(0xFF8A3F38),
+                        ),
+                        const SizedBox(height: 12),
+                        Text(
+                          _startupErrorMessage(_error!),
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(color: Color(0xFF3E3834)),
+                        ),
+                        const SizedBox(height: 12),
+                        TextButton.icon(
+                          onPressed: () {
+                            setState(() => _error = null);
+                            _initialize();
+                          },
+                          icon: const Icon(Icons.refresh_rounded),
+                          label: const Text('重试'),
+                        ),
+                      ],
+                    ),
                   ),
-          ),
+                ),
         ),
       ),
     );
@@ -107,47 +166,13 @@ class AgentAtelierRApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const ink = Color(0xFF262521);
-    const paper = Color(0xFFF6F3ED);
-    const darkSurface = Color(0xFF171A1A);
-    final lightTheme = ThemeData(
-      useMaterial3: true,
-      colorScheme: ColorScheme.fromSeed(
-        seedColor: const Color(0xFF2D796A),
-        brightness: Brightness.light,
-        surface: paper,
-      ),
-      scaffoldBackgroundColor: paper,
-      textTheme: ThemeData.light().textTheme.apply(
-        bodyColor: ink,
-        displayColor: ink,
-      ),
-      inputDecorationTheme: const InputDecorationTheme(
-        border: InputBorder.none,
-        isDense: true,
-      ),
-    );
-    final darkTheme = ThemeData(
-      useMaterial3: true,
-      colorScheme: ColorScheme.fromSeed(
-        seedColor: const Color(0xFF78C8B4),
-        brightness: Brightness.dark,
-        surface: darkSurface,
-      ),
-      scaffoldBackgroundColor: darkSurface,
-      inputDecorationTheme: const InputDecorationTheme(
-        border: InputBorder.none,
-        isDense: true,
-      ),
-    );
-
     return AnimatedBuilder(
       animation: controller,
       builder: (context, _) => MaterialApp(
         debugShowCheckedModeBanner: false,
         title: 'AgentAtelierR',
-        theme: lightTheme,
-        darkTheme: darkTheme,
+        theme: atelierTheme(controller.accentTheme, Brightness.light),
+        darkTheme: atelierTheme(controller.accentTheme, Brightness.dark),
         themeMode: switch (controller.themePreference) {
           AppThemePreference.system => ThemeMode.system,
           AppThemePreference.light => ThemeMode.light,

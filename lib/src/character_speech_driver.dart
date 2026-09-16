@@ -24,11 +24,28 @@ class RigMotion {
 }
 
 class CharacterPerformanceProfile {
-  CharacterPerformanceProfile._(this.drivers, this.aimBones, this.rollBones);
+  CharacterPerformanceProfile._(
+    this.drivers,
+    this.aimBones,
+    this.rollBones, [
+    this.emotionProfiles = const {},
+    this.decayRates = const {},
+  ]);
 
   final List<Map<String, dynamic>> drivers;
   final Map<String, String> aimBones;
   final Map<String, String> rollBones;
+  final Map<String, dynamic> emotionProfiles;
+  final Map<String, dynamic> decayRates;
+
+  Map<String, dynamic> tensionProfile(String emotion, String band) {
+    final profile = emotionProfiles[emotion] ?? emotionProfiles['neutral'];
+    if (profile is! Map) return const {};
+    final bands = profile['tensionProfiles'];
+    if (bands is! Map) return const {};
+    final result = bands[band] ?? bands['low'] ?? bands['high'];
+    return result is Map ? Map<String, dynamic>.from(result) : const {};
+  }
 
   bool get hasResourceDrivers => drivers.isNotEmpty;
 
@@ -61,6 +78,13 @@ class CharacterPerformanceProfile {
       drivers,
       bones('aimSlots'),
       bones('rollSlots'),
+      Map<String, dynamic>.from(gesture?['EmotionProfilesV4'] as Map? ?? {}),
+      Map<String, dynamic>.from(
+        ((json['projectConfig'] as Map?)?['tensionConfig']
+                    as Map?)?['decayRates']
+                as Map? ??
+            {},
+      ),
     );
   }
 }
@@ -78,6 +102,12 @@ class CharacterPerformanceDirector {
   double _transition = 1;
   double _hold = 1;
   double _strength = 0.3;
+  double _tension = 0;
+  String _band = 'low';
+  String? _driverBand;
+  int _repeatsLeft = 0;
+  bool _usingBindings = false;
+  String get tensionBand => _band;
   Map<String, RigMotion> _from = {};
   Map<String, RigMotion> _target = {};
   final Map<String, double> _followerDelays = {};
@@ -129,22 +159,74 @@ class CharacterPerformanceDirector {
     bool suppressed = false,
   }) {
     final dt = delta.isFinite ? delta.clamp(0.0, 0.05).toDouble() : 0.0;
+    final rate = _number(
+      profile.decayRates,
+      speaking ? 'high' : _band,
+      0.022,
+    ).clamp(0.001, 1.0);
+    _tension += ((speaking ? 1 : 0) - _tension) * (1 - exp(-rate * 60 * dt));
+    _band = _tension < 0.33
+        ? 'low'
+        : _tension < 0.66
+        ? 'mid'
+        : 'high';
+    final bandProfile = profile.tensionProfile(emotion, _band);
     if (_driver == null ||
         _emotion != emotion ||
+        _driverBand != _band ||
         _elapsed >= _transition + _hold) {
-      var candidates = profile.drivers
-          .where((d) => (d['id'] as String).startsWith('${emotion}_n_'))
-          .toList();
-      if (candidates.isEmpty) {
-        candidates = profile.drivers
-            .where((d) => (d['id'] as String).startsWith('neutral_n_'))
+      final samePattern = _emotion == emotion && _driverBand == _band;
+      final bindings = bandProfile['ambientBindings'];
+      _usingBindings = bindings is List;
+      if (_usingBindings) {
+        if (samePattern && _repeatsLeft > 0) {
+          _repeatsLeft--;
+        } else {
+          final valid = (bindings as List)
+              .whereType<Map>()
+              .where(
+                (b) =>
+                    _number(b, 'weight', 0) > 0 &&
+                    profile.drivers.any((d) => d['id'] == b['driverDefId']),
+              )
+              .toList();
+          var ticket =
+              _random.nextDouble() *
+              valid.fold<double>(0, (sum, b) => sum + _number(b, 'weight', 0));
+          Map? choice;
+          for (final binding in valid) {
+            ticket -= _number(binding, 'weight', 0);
+            choice = binding;
+            if (ticket <= 0) break;
+          }
+          _driver = choice == null
+              ? const {'id': 'ambient_rest', 'driver': 'head'}
+              : profile.drivers.firstWhere(
+                  (d) => d['id'] == choice!['driverDefId'],
+                );
+          final lo = _number(choice ?? {}, 'repeatMin', 1).round().clamp(1, 12);
+          final hi = _number(
+            choice ?? {},
+            'repeatMax',
+            lo.toDouble(),
+          ).round().clamp(lo, 12);
+          _repeatsLeft = lo + _random.nextInt(hi - lo + 1) - 1;
+        }
+      } else {
+        var candidates = profile.drivers
+            .where((d) => (d['id'] as String).startsWith('${emotion}_n_'))
             .toList();
+        if (candidates.isEmpty) {
+          candidates = profile.drivers
+              .where((d) => (d['id'] as String).startsWith('neutral_n_'))
+              .toList();
+        }
+        final alternatives = candidates.where((d) => d != _driver).toList();
+        if (alternatives.isNotEmpty) candidates = alternatives;
+        _driver = candidates.isEmpty
+            ? _fallbackDriver
+            : candidates[_random.nextInt(candidates.length)];
       }
-      final alternatives = candidates.where((d) => d != _driver).toList();
-      if (alternatives.isNotEmpty) candidates = alternatives;
-      _driver = candidates.isEmpty
-          ? _fallbackDriver
-          : candidates[_random.nextInt(candidates.length)];
       // A new lead part starts at its own current pose. Reusing one shared
       // head target here used to transfer it abruptly to the body or eyes.
       _from = Map.of(_parts);
@@ -168,9 +250,13 @@ class CharacterPerformanceDirector {
           0.3,
         ).clamp(0.06, 1.0);
       }
-      _transition = _range(_driver!, 'transition', 1, 0.4, 4);
-      _hold = _range(_driver!, 'hold', 1.5, 0.2, 5);
+      final gaze = bandProfile['gaze'] as Map? ?? {};
+      final modifiers = gaze['motionModifiers'] as Map? ?? {};
+      final tempo = _number(modifiers, 'tempoScale', 1).clamp(0.5, 1.5);
+      _transition = _range(_driver!, 'transition', 1, 0.4, 4) / tempo;
+      _hold = _range(_driver!, 'hold', 1.5, 0.2, 12);
       _emotion = emotion;
+      _driverBand = _band;
       _elapsed = 0;
     }
     _elapsed += dt;
@@ -183,6 +269,8 @@ class CharacterPerformanceDirector {
         ? 0.0
         : speaking
         ? 0.85
+        : _usingBindings
+        ? 0.55
         : 0.30;
     // Mouth energy includes syllable-rate pulses, especially the Android
     // fallback envelope. It must not shake the head/body. Keep the argument

@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:math';
 
+import 'character_motion_dynamics.dart';
+
 /// The legacy gesture resource's authored dialogue behavior.
 ///
 /// Animation names are kept verbatim: some eye/mouth names are stems and must
@@ -10,11 +12,15 @@ class CharacterResourceBehavior {
     this.profiles, {
     this.fixedBasePoseMode = true,
     this.lockSittingAxis = true,
+    this.transitions,
+    this.windAnimationPrefix = 'effect_wind',
   });
 
   final Map<String, CharacterResourceEmotionProfile> profiles;
   final bool fixedBasePoseMode;
   final bool lockSittingAxis;
+  final CharacterMotionTransitions? transitions;
+  final String windAnimationPrefix;
 
   factory CharacterResourceBehavior.parse(String source) {
     Object? decoded;
@@ -38,6 +44,10 @@ class CharacterResourceBehavior {
       Map.unmodifiable(result),
       fixedBasePoseMode: config['fixedBasePoseMode'] != false,
       lockSittingAxis: config['lockSittingAxis'] != false,
+      transitions: CharacterMotionTransitions(root),
+      windAnimationPrefix: _text(config['windAnimationPrefix']).isEmpty
+          ? 'effect_wind'
+          : _text(config['windAnimationPrefix']),
     );
   }
 }

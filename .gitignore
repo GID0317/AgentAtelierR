@@ -34,6 +34,12 @@ Thumbs.db
 *.zip
 *.rar
 *.7z
+*.aarpack
+*.aarpreview
+.asset_protection/
+*.key
+*.symbols
+*.map.json
 
 # Media, animation, and model files are local-only, regardless of location.
 *.png
@@ -82,3 +88,6 @@ downloaded_skin_resources/
 /windows/
 *.dex
 *.arsc
+# Local-only downloaded outfits: all revisions, textures, skeletons and gestures.
+**/crf_skn_002_000[2-5]_01*
+**/firebase_distribution_test_*/

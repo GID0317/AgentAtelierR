@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
@@ -17,6 +18,7 @@ class CharacterCamera extends StatefulWidget {
     this.maxScale = 2.2,
     this.initialScale = 1.25,
     this.initialVerticalOffsetFraction = 0.2,
+    this.keepSceneProportions = false,
   });
 
   final Widget child;
@@ -27,6 +29,7 @@ class CharacterCamera extends StatefulWidget {
   final double maxScale;
   final double initialScale;
   final double initialVerticalOffsetFraction;
+  final bool keepSceneProportions;
 
   @override
   State<CharacterCamera> createState() => _CharacterCameraState();
@@ -37,6 +40,7 @@ class _CharacterCameraState extends State<CharacterCamera>
   late double _scale;
   double _scaleAtGestureStart = 1;
   double? _verticalOffset;
+  Size? _referenceSceneSize;
   bool _pinchDetected = false;
   bool _suppressTap = false;
   Timer? _tapSuppressionTimer;
@@ -69,6 +73,10 @@ class _CharacterCameraState extends State<CharacterCamera>
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (context, constraints) {
+        if (constraints.maxWidth > 0 && constraints.maxHeight > 0) {
+          _referenceSceneSize ??= constraints.biggest;
+        }
+        final referenceSize = _referenceSceneSize ?? constraints.biggest;
         final verticalOffset =
             _verticalOffset ??
             constraints.maxHeight * widget.initialVerticalOffsetFraction;
@@ -169,7 +177,18 @@ class _CharacterCameraState extends State<CharacterCamera>
                   key: characterCameraTransformKey,
                   scale: _scale,
                   alignment: Alignment.bottomCenter,
-                  child: widget.child,
+                  child: widget.keepSceneProportions
+                      ? SizedBox.expand(
+                          child: FittedBox(
+                            fit: BoxFit.contain,
+                            alignment: Alignment.bottomCenter,
+                            child: SizedBox.fromSize(
+                              size: referenceSize,
+                              child: widget.child,
+                            ),
+                          ),
+                        )
+                      : widget.child,
                 ),
               ),
             ),
@@ -185,8 +204,21 @@ class _CharacterCameraState extends State<CharacterCamera>
     double verticalOffset,
   ) {
     final translated = position - Offset(0, verticalOffset);
-    if ((_scale - 1).abs() < 0.001) return translated;
     final origin = Offset(stageSize.width / 2, stageSize.height);
-    return origin + (translated - origin) / _scale;
+    final cameraPosition = origin + (translated - origin) / _scale;
+    final reference = _referenceSceneSize;
+    if (!widget.keepSceneProportions || reference == null) {
+      return cameraPosition;
+    }
+    final fitScale = math.min(
+      stageSize.width / reference.width,
+      stageSize.height / reference.height,
+    );
+    if (fitScale <= 0) return cameraPosition;
+    final sceneOrigin = Offset(
+      (stageSize.width - reference.width * fitScale) / 2,
+      stageSize.height - reference.height * fitScale,
+    );
+    return (cameraPosition - sceneOrigin) / fitScale;
   }
 }

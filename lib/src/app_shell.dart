@@ -1,20 +1,39 @@
+import 'dart:async';
+import 'dart:io' show Platform;
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'app_controller.dart';
 import 'app_localization.dart';
 import 'alarm_screen.dart';
+import 'alchemy_screen.dart';
 import 'chat_screen.dart';
+import 'frame_rate_controller.dart';
+import 'folding_button_group.dart';
 import 'glass_ui.dart';
+import 'mission_screen.dart';
+import 'page_navigation.dart';
 import 'settings_screen.dart';
 import 'soundscape_controller.dart';
 import 'world_map_screen.dart';
 
-enum AppDestination { chat, worldMap, alarms, settings, runtimeLogs }
+enum AppDestination {
+  chat,
+  worldMap,
+  alchemy,
+  missions,
+  alarms,
+  settings,
+  runtimeLogs,
+}
 
 extension AppDestinationData on AppDestination {
   String label(AppLanguage language) => switch (this) {
     AppDestination.chat => language.text('角色聊天', 'Character chat', 'キャラクター会話'),
     AppDestination.worldMap => language.text('世界地图', 'World map', 'ワールドマップ'),
+    AppDestination.alchemy => language.text('炼金工房', 'Atelier', 'アトリエ'),
+    AppDestination.missions => language.text('任务', 'Quests', 'クエスト'),
     AppDestination.alarms => language.text('语音闹钟', 'Voice alarms', 'ボイスアラーム'),
     AppDestination.settings => language.text('设置', 'Settings', '設定'),
     AppDestination.runtimeLogs => language.text('运行日志', 'Runtime logs', '実行ログ'),
@@ -23,6 +42,8 @@ extension AppDestinationData on AppDestination {
   IconData get icon => switch (this) {
     AppDestination.chat => Icons.chat_bubble_outline,
     AppDestination.worldMap => Icons.map_outlined,
+    AppDestination.alchemy => Icons.science_outlined,
+    AppDestination.missions => Icons.assignment_outlined,
     AppDestination.alarms => Icons.alarm_outlined,
     AppDestination.settings => Icons.settings_outlined,
     AppDestination.runtimeLogs => Icons.bug_report_outlined,
@@ -38,20 +59,55 @@ class AppShell extends StatefulWidget {
   State<AppShell> createState() => _AppShellState();
 }
 
-class _AppShellState extends State<AppShell> {
+class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   final _scaffoldKey = GlobalKey<ScaffoldState>();
   final _soundscape = SoundscapeController();
-  AppDestination _destination = AppDestination.chat;
+  final _navigation = PageNavigation(AppDestination.chat);
+  AppDestination get _destination => _navigation.current;
+  final _settingsKey = GlobalKey<SettingsScreenState>();
+  final _worldMapKey = GlobalKey<WorldMapScreenState>();
   bool _menuOpen = false;
   bool _chatUiHidden = false;
+  bool _alwaysOnTop = false;
+  final Set<int> _activePointers = <int>{};
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) {
+      _activePointers.clear();
+      widget.controller.frameRate.setActivity(FrameRateActivity.touch, false);
+      return;
+    }
+    widget.controller.frameRate.setMode(
+      widget.controller.frameRateMode,
+      force: true,
+    );
+    widget.controller.frameRate.boost(FrameRateActivity.interfaceAnimation);
+    _soundscape.invalidate();
+    unawaited(
+      _soundscape.sync(
+        widget.controller,
+        worldMapVisible: _destination == AppDestination.worldMap,
+      ),
+    );
+  }
 
   @override
   void dispose() {
-    _soundscape.dispose();
+    WidgetsBinding.instance.removeObserver(this);
+    widget.controller.frameRate.setActivity(FrameRateActivity.touch, false);
+    unawaited(_soundscape.dispose());
     super.dispose();
   }
 
   void _openMenu() {
+    widget.controller.frameRate.boost(FrameRateActivity.interfaceAnimation);
     setState(() => _menuOpen = !_menuOpen);
   }
 
@@ -63,14 +119,51 @@ class _AppShellState extends State<AppShell> {
   }
 
   void _selectDestination(AppDestination value) {
-    Navigator.maybePop(context);
+    widget.controller.frameRate.boost(FrameRateActivity.interfaceAnimation);
     if (value == AppDestination.worldMap && _destination != value) {
       widget.controller.recordMapVisit();
     }
     setState(() {
-      _destination = value;
+      _navigation.select(value);
       _menuOpen = false;
     });
+  }
+
+  void _handleBack() {
+    // One owner handles root back events. Nested PopScopes on the same route
+    // would all be notified, potentially closing two levels in one gesture.
+    if (_menuOpen) {
+      setState(() => _menuOpen = false);
+      return;
+    }
+    if (_destination == AppDestination.settings &&
+        (_settingsKey.currentState?.handleBack() ?? false)) {
+      return;
+    }
+    if (_destination == AppDestination.worldMap &&
+        (_worldMapKey.currentState?.handleBack() ?? false)) {
+      return;
+    }
+    if (_chatUiHidden) {
+      setState(() => _chatUiHidden = false);
+      return;
+    }
+    if (_navigation.canGoBack) {
+      widget.controller.frameRate.boost(FrameRateActivity.interfaceAnimation);
+      setState(_navigation.goBack);
+    }
+  }
+
+  void _handlePointerDown(PointerDownEvent event) {
+    _activePointers.add(event.pointer);
+    widget.controller.frameRate.setActivity(FrameRateActivity.touch, true);
+  }
+
+  void _handlePointerEnd(PointerEvent event) {
+    _activePointers.remove(event.pointer);
+    if (_activePointers.isNotEmpty) return;
+    widget.controller.frameRate.setActivity(FrameRateActivity.touch, false);
+    widget.controller.frameRate.boost(FrameRateActivity.interfaceAnimation);
   }
 
   @override
@@ -86,23 +179,32 @@ class _AppShellState extends State<AppShell> {
         });
         // Keep the chat element at the same tree location: replacing its
         // parent on settings navigation disposes playback, replay files and drafts.
+        final overlayDestination = switch (_destination) {
+          AppDestination.settings ||
+          AppDestination.alchemy ||
+          AppDestination.missions => true,
+          _ => false,
+        };
         final content = Stack(
           children: [
             IndexedStack(
-              index: _destination == AppDestination.settings
+              index: overlayDestination
                   ? AppDestination.chat.index
                   : _destination.index,
               children: [
                 ChatScreen(
                   controller: widget.controller,
                   onMenuPressed: _openMenu,
-                  hideUi: _chatUiHidden,
+                  hideUi: _chatUiHidden || overlayDestination,
                 ),
                 WorldMapScreen(
+                  key: _worldMapKey,
                   controller: widget.controller,
                   onMenuPressed: _openMenu,
                   onClose: () => _selectDestination(AppDestination.chat),
                 ),
+                const SizedBox.shrink(),
+                const SizedBox.shrink(),
                 AlarmScreen(
                   controller: widget.controller,
                   onMenuPressed: _openMenu,
@@ -117,57 +219,91 @@ class _AppShellState extends State<AppShell> {
             ),
             if (_destination == AppDestination.settings)
               SettingsScreen(
+                key: _settingsKey,
+                backHandledByShell: true,
                 controller: widget.controller,
                 onMenuPressed: _openMenu,
               ),
+            if (_destination == AppDestination.alchemy)
+              AlchemyScreen(controller: widget.controller),
+            if (_destination == AppDestination.missions)
+              MissionScreen(controller: widget.controller),
           ],
         );
         final safeTop = MediaQuery.paddingOf(context).top;
-        return Scaffold(
-          key: _scaffoldKey,
-          body: Stack(
-            children: [
-              content,
-              if (!_chatUiHidden)
-                Positioned(
-                  left: 16,
-                  top: safeTop + 8,
-                  child: GlassIconButton(
-                    liquidGlass: widget.controller.liquidGlassChatUi,
-                    size: 48,
-                    icon: _menuOpen ? Icons.close_rounded : Icons.menu_rounded,
-                    tooltip: widget.controller.interfaceLanguage.text(
-                      _menuOpen ? '关闭菜单' : '打开菜单',
-                      _menuOpen ? 'Close menu' : 'Open menu',
-                      _menuOpen ? 'メニューを閉じる' : 'メニューを開く',
+        return PopScope(
+          canPop: !_navigation.canGoBack && !_menuOpen && !_chatUiHidden,
+          onPopInvokedWithResult: (didPop, _) {
+            if (!didPop) _handleBack();
+          },
+          child: Scaffold(
+            key: _scaffoldKey,
+            body: Listener(
+              behavior: HitTestBehavior.translucent,
+              onPointerDown: _handlePointerDown,
+              onPointerUp: _handlePointerEnd,
+              onPointerCancel: _handlePointerEnd,
+              child: Stack(
+                children: [
+                  content,
+                  if (!_chatUiHidden)
+                    Positioned(
+                      left: 16,
+                      top: safeTop + 8,
+                      child: GlassIconButton(
+                        liquidGlass: widget.controller.liquidGlassChatUi,
+                        size: 48,
+                        icon: _menuOpen
+                            ? Icons.close_rounded
+                            : Icons.menu_rounded,
+                        tooltip: widget.controller.interfaceLanguage.text(
+                          _menuOpen ? '关闭菜单' : '打开菜单',
+                          _menuOpen ? 'Close menu' : 'Open menu',
+                          _menuOpen ? 'メニューを閉じる' : 'メニューを開く',
+                        ),
+                        onPressed: _openMenu,
+                      ),
                     ),
-                    onPressed: _openMenu,
-                  ),
-                ),
-              if (_destination == AppDestination.chat)
-                Positioned(
-                  left: 72,
-                  top: safeTop + 8,
-                  child: GlassIconButton(
-                    liquidGlass: widget.controller.liquidGlassChatUi,
-                    size: 48,
-                    icon: _chatUiHidden
-                        ? Icons.visibility_rounded
-                        : Icons.visibility_off_rounded,
-                    tooltip: widget.controller.interfaceLanguage.text(
-                      _chatUiHidden ? '恢复界面' : '隐藏界面',
-                      _chatUiHidden ? 'Restore interface' : 'Hide interface',
-                      _chatUiHidden ? 'UIを表示' : 'UIを隠す',
+                  if (_destination == AppDestination.chat)
+                    Positioned(
+                      left: 72,
+                      top: safeTop + 8,
+                      child: GlassIconButton(
+                        liquidGlass: widget.controller.liquidGlassChatUi,
+                        size: 48,
+                        icon: _chatUiHidden
+                            ? Icons.visibility_rounded
+                            : Icons.visibility_off_rounded,
+                        tooltip: widget.controller.interfaceLanguage.text(
+                          _chatUiHidden ? '恢复界面' : '隐藏界面',
+                          _chatUiHidden
+                              ? 'Restore interface'
+                              : 'Hide interface',
+                          _chatUiHidden ? 'UIを表示' : 'UIを隠す',
+                        ),
+                        onPressed: _toggleChatUiVisibility,
+                      ),
                     ),
-                    onPressed: _toggleChatUiVisibility,
-                  ),
-                ),
-              if (_menuOpen) _buildFoldMenu(),
-            ],
+                  _buildFoldMenu(),
+                ],
+              ),
+            ),
           ),
         );
       },
     );
+  }
+
+  Future<void> _toggleAlwaysOnTop() async {
+    if (!Platform.isWindows) return;
+    final next = !_alwaysOnTop;
+    try {
+      const channel = MethodChannel('agentatelier/window');
+      await channel.invokeMethod<void>('setAlwaysOnTop', next);
+      if (mounted) setState(() => _alwaysOnTop = next);
+    } catch (_) {
+      // The control is only available on the Windows runner.
+    }
   }
 
   Widget _buildFoldMenu() {
@@ -178,19 +314,29 @@ class _AppShellState extends State<AppShell> {
       top: MediaQuery.paddingOf(context).top + 64,
       child: Material(
         color: Colors.transparent,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+        child: FoldingButtonGroup(
+          fromRight: false,
+          expanded: _menuOpen && !_chatUiHidden,
           children: [
-            for (final destination in AppDestination.values)
-              Padding(
-                padding: const EdgeInsets.only(top: 8),
-                child: GlassIconButton(
-                  liquidGlass: liquidGlass,
-                  size: 48,
-                  icon: destination.icon,
-                  tooltip: destination.label(language),
-                  onPressed: () => _selectDestination(destination),
+            if (Platform.isWindows)
+              GlassIconButton(
+                liquidGlass: liquidGlass,
+                size: 48,
+                icon: _alwaysOnTop ? Icons.push_pin : Icons.push_pin_outlined,
+                tooltip: language.text(
+                  _alwaysOnTop ? '取消置顶' : '窗口置顶',
+                  _alwaysOnTop ? 'Unpin window' : 'Always on top',
+                  _alwaysOnTop ? '最前面を解除' : '最前面に固定',
                 ),
+                onPressed: _toggleAlwaysOnTop,
+              ),
+            for (final destination in AppDestination.values)
+              GlassIconButton(
+                liquidGlass: liquidGlass,
+                size: 48,
+                icon: destination.icon,
+                tooltip: destination.label(language),
+                onPressed: () => _selectDestination(destination),
               ),
           ],
         ),

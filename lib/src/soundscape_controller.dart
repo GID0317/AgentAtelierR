@@ -2,6 +2,7 @@ import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/services.dart';
 
 import 'app_controller.dart';
+import 'runtime_log.dart';
 import 'stage_environment_catalog.dart';
 
 class SoundscapeController {
@@ -23,8 +24,22 @@ class SoundscapeController {
     final next = previous.then(
       (_) => _syncNow(controller, worldMapVisible: worldMapVisible),
     );
-    _pendingSync = next.catchError((_) {});
-    return next;
+    final guarded = next.catchError((Object error, StackTrace stackTrace) {
+      RuntimeLog.instance.error('Soundscape', error, stackTrace);
+    });
+    _pendingSync = guarded;
+    return guarded;
+  }
+
+  void invalidate() {
+    _bgmEnabled = null;
+    _ambientEnabled = null;
+    _sceneTime = null;
+    _selectedStageId = null;
+    _bgmAsset = null;
+    _ambientAsset = null;
+    _bgmVolume = null;
+    _ambientVolume = null;
   }
 
   Future<void> _syncNow(
@@ -35,8 +50,6 @@ class SoundscapeController {
         ? StageEnvironmentCatalog.worldMapBgmAsset
         : await _chatBgmAssetFor(controller.selectedStageId);
     if (_bgmEnabled != controller.bgmEnabled || _bgmAsset != nextBgmAsset) {
-      _bgmEnabled = controller.bgmEnabled;
-      _bgmAsset = nextBgmAsset;
       await _bgmPlayer.stop();
       if (controller.bgmEnabled) {
         await _bgmPlayer.setReleaseMode(ReleaseMode.loop);
@@ -45,10 +58,12 @@ class SoundscapeController {
           volume: controller.bgmVolume,
         );
       }
+      _bgmEnabled = controller.bgmEnabled;
+      _bgmAsset = nextBgmAsset;
     }
     if (_bgmVolume != controller.bgmVolume) {
-      _bgmVolume = controller.bgmVolume;
       await _bgmPlayer.setVolume(controller.bgmVolume);
+      _bgmVolume = controller.bgmVolume;
     }
     final nextAmbientAsset = StageEnvironmentCatalog.ambientAssetFor(
       controller.selectedStageId,
@@ -58,10 +73,6 @@ class SoundscapeController {
         _selectedStageId != controller.selectedStageId ||
         _sceneTime != controller.sceneTime ||
         _ambientAsset != nextAmbientAsset) {
-      _ambientEnabled = controller.ambientEnabled;
-      _selectedStageId = controller.selectedStageId;
-      _sceneTime = controller.sceneTime;
-      _ambientAsset = nextAmbientAsset;
       await _ambientPlayer.stop();
       if (controller.ambientEnabled && nextAmbientAsset != null) {
         await _ambientPlayer.setReleaseMode(ReleaseMode.loop);
@@ -70,10 +81,14 @@ class SoundscapeController {
           volume: controller.ambientVolume,
         );
       }
+      _ambientEnabled = controller.ambientEnabled;
+      _selectedStageId = controller.selectedStageId;
+      _sceneTime = controller.sceneTime;
+      _ambientAsset = nextAmbientAsset;
     }
     if (_ambientVolume != controller.ambientVolume) {
-      _ambientVolume = controller.ambientVolume;
       await _ambientPlayer.setVolume(controller.ambientVolume);
+      _ambientVolume = controller.ambientVolume;
     }
   }
 

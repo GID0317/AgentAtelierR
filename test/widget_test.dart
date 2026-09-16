@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 
@@ -470,6 +471,115 @@ void main() {
 
     expect(apiCalls, 2);
     expect(output.join(), '已根据搜索结果回答。');
+  });
+
+  test('agent exposes and executes dialogue alchemy tools', () async {
+    var apiCalls = 0;
+    String? executedTool;
+    final client = MockClient((request) async {
+      apiCalls += 1;
+      final body = jsonDecode(request.body) as Map<String, dynamic>;
+      if (apiCalls == 1) {
+        final tools = (body['tools'] as List<dynamic>)
+            .whereType<Map<String, dynamic>>()
+            .toList();
+        final toolNames = tools
+            .map((tool) => (tool['function'] as Map<String, dynamic>)['name'])
+            .toList();
+        expect(
+          toolNames,
+          containsAll(<String>[
+            'inspect_quests',
+            'create_quest',
+            'inspect_alchemy_inventory',
+            'gather_current_location',
+            'synthesize_custom_item',
+            'inspect_map_locations',
+            'travel_to_stage',
+          ]),
+        );
+        final gatherTool = tools.firstWhere(
+          (tool) =>
+              (tool['function'] as Map<String, dynamic>)['name'] ==
+              'gather_current_location',
+        );
+        final gatherParameters =
+            ((gatherTool['function'] as Map<String, dynamic>)['parameters']
+                as Map<String, dynamic>);
+        expect(gatherParameters['required'], contains('discoveries'));
+        final discoverySchema =
+            (gatherParameters['properties']
+                    as Map<String, dynamic>)['discoveries']
+                as Map<String, dynamic>;
+        expect(discoverySchema['minItems'], 1);
+        expect(discoverySchema['maxItems'], 3);
+        return http.Response.bytes(
+          utf8.encode(
+            jsonEncode({
+              'choices': [
+                {
+                  'message': {
+                    'role': 'assistant',
+                    'content': '',
+                    'tool_calls': [
+                      {
+                        'id': 'call_inventory',
+                        'type': 'function',
+                        'function': {
+                          'name': 'inspect_alchemy_inventory',
+                          'arguments': '{}',
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+            }),
+          ),
+          200,
+          headers: {'content-type': 'application/json; charset=utf-8'},
+        );
+      }
+      final messages = body['messages'] as List<dynamic>;
+      expect(
+        (messages.last as Map<String, dynamic>)['content'],
+        contains('inventory'),
+      );
+      return http.Response.bytes(
+        utf8.encode(
+          jsonEncode({
+            'choices': [
+              {
+                'message': {'role': 'assistant', 'content': '背包已查看。'},
+              },
+            ],
+          }),
+        ),
+        200,
+        headers: {'content-type': 'application/json; charset=utf-8'},
+      );
+    });
+    final service = OpenAiCompatibleClient(
+      client: client,
+      contextToolExecutor: (name, arguments) async {
+        executedTool = name;
+        return '{"inventory":[]}';
+      },
+    );
+
+    final output = await service
+        .streamChat(
+          baseUrl: 'https://api.openai.com/v1',
+          apiKey: 'test-key',
+          model: 'gpt-test',
+          systemPrompt: 'test',
+          messages: const [ChatMessage(text: '看看背包', isUser: true)],
+          agentEnabled: true,
+        )
+        .join();
+
+    expect(executedTool, 'inspect_alchemy_inventory');
+    expect(output, '背包已查看。');
   });
 
   test('agent exposes and executes on-demand device tools', () async {
@@ -1922,11 +2032,11 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final controller = await AppController.load();
     final newBackup = controller.exportData();
-    expect(() => controller.importData(newBackup), returnsNormally);
+    await expectLater(controller.importData(newBackup), completes);
 
     final legacyBackup = Map<String, dynamic>.from(newBackup)
       ..['format'] = 'ryza-chat-local-backup';
-    expect(() => controller.importData(legacyBackup), returnsNormally);
+    await expectLater(controller.importData(legacyBackup), completes);
   });
 
   test('Qwen voice cloning validates names before sending', () async {
@@ -2070,6 +2180,7 @@ void main() {
       characterAppearanceById('summer_yellow_01').promptDescription,
       contains('黄白配色'),
     );
+    expect(characterAppearanceById('crf_skn_002_0005_01').hasPreview, isTrue);
   });
 
   test(
@@ -2157,11 +2268,13 @@ void main() {
   });
 
   test('original gesture files expose all composited motion groups', () async {
-    final seated = await loadCharacterMotionGroups(
-      characterAppearanceById('seated_01'),
+    final seatedAppearance = characterAppearanceById('seated_01');
+    final standingAppearance = characterAppearanceById('standing_99');
+    final seated = parseCharacterMotionGroups(
+      File(seatedAppearance.gestureAsset).readAsStringSync(),
     );
-    final standing = await loadCharacterMotionGroups(
-      characterAppearanceById('standing_99'),
+    final standing = parseCharacterMotionGroups(
+      File(standingAppearance.gestureAsset).readAsStringSync(),
     );
 
     expect(seated, hasLength(140));

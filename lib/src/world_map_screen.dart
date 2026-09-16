@@ -9,6 +9,7 @@ import 'app_controller.dart';
 import 'app_localization.dart';
 import 'character_catalog.dart';
 import 'glass_ui.dart';
+import 'ryza_loading_indicator.dart';
 import 'world_map_localization.dart';
 
 const Size worldMapLogicalSize = Size(2048, 1152);
@@ -291,6 +292,24 @@ Offset projectMapPosition({
   );
 }
 
+int? nearestStageIndexWithinRadius({
+  required List<Offset> positions,
+  required Offset point,
+  double radius = 58,
+}) {
+  if (positions.isEmpty) return null;
+  var nearestIndex = 0;
+  var nearestDistance = double.infinity;
+  for (var index = 0; index < positions.length; index++) {
+    final distance = (point - positions[index]).distance;
+    if (distance < nearestDistance) {
+      nearestDistance = distance;
+      nearestIndex = index;
+    }
+  }
+  return nearestDistance <= radius ? nearestIndex : null;
+}
+
 List<Offset> stageNodePositions(int count) {
   const compact = <Offset>[
     Offset(0.25, 0.56),
@@ -321,10 +340,10 @@ class WorldMapScreen extends StatefulWidget {
   final VoidCallback onClose;
 
   @override
-  State<WorldMapScreen> createState() => _WorldMapScreenState();
+  State<WorldMapScreen> createState() => WorldMapScreenState();
 }
 
-class _WorldMapScreenState extends State<WorldMapScreen>
+class WorldMapScreenState extends State<WorldMapScreen>
     with SingleTickerProviderStateMixin {
   late final Future<WorldMapData> _data = _loadData();
   late final TransformationController _mapTransform;
@@ -334,6 +353,30 @@ class _WorldMapScreenState extends State<WorldMapScreen>
   String? _focusedFieldId;
   String? _previewStageId;
   Size _viewportSize = Size.zero;
+  WorldMapData? _loadedData;
+
+  bool handleBack() {
+    if (_focusedFieldId == null) return false;
+    final data = _loadedData;
+    if (data != null) {
+      final area = _areaById(
+        data,
+        _activeAreaId ?? widget.controller.selectedAreaId,
+      );
+      final field = area.fields
+          .where((f) => f.id == _focusedFieldId)
+          .firstOrNull;
+      if (field != null) {
+        _leaveField(area, field);
+        return true;
+      }
+    }
+    setState(() {
+      _focusedFieldId = null;
+      _previewStageId = null;
+    });
+    return true;
+  }
 
   @override
   void initState() {
@@ -364,7 +407,7 @@ class _WorldMapScreenState extends State<WorldMapScreen>
     ]);
     final worldJson = jsonDecode(files[0]) as Map<String, dynamic>;
     final npcJson = jsonDecode(files[1]) as Map<String, dynamic>;
-    return WorldMapData(
+    final data = WorldMapData(
       areas: (worldJson['areas'] as List<dynamic>)
           .map((value) => WorldArea.fromJson(value as Map<String, dynamic>))
           .toList(),
@@ -372,6 +415,8 @@ class _WorldMapScreenState extends State<WorldMapScreen>
           .map((value) => MapNpc.fromJson(value as Map<String, dynamic>))
           .toList(),
     );
+    _loadedData = data;
+    return data;
   }
 
   double _coverScale(Size viewport) => max(
@@ -649,7 +694,9 @@ class _WorldMapScreenState extends State<WorldMapScreen>
             );
           }
           if (!snapshot.hasData) {
-            return const Center(child: CircularProgressIndicator.adaptive());
+            return const Center(
+              child: RyzaLoadingIndicator(semanticsLabel: '正在加载世界地图'),
+            );
           }
           return _buildMap(snapshot.data!);
         },
@@ -669,6 +716,11 @@ class _WorldMapScreenState extends State<WorldMapScreen>
     final previewStage = focusedField?.stages
         .where((stage) => stage.id == _previewStageId)
         .firstOrNull;
+    final canTravel =
+        previewStage != null &&
+        (previewStage.id != widget.controller.selectedStageId ||
+            area.id != widget.controller.selectedAreaId);
+    final canEnterScene = previewStage != null;
 
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -741,17 +793,12 @@ class _WorldMapScreenState extends State<WorldMapScreen>
               ),
               liquidGlass: widget.controller.liquidGlassChatUi,
               language: widget.controller.interfaceLanguage,
-              canTravel:
-                  previewStage != null &&
-                  (previewStage.id != widget.controller.selectedStageId ||
-                      area.id != widget.controller.selectedAreaId),
+              canTravel: canTravel,
+              canEnterScene: canEnterScene,
               onAreaPressed: () => _showAreaPicker(data),
-              onActionPressed:
-                  previewStage != null &&
-                      (previewStage.id != widget.controller.selectedStageId ||
-                          area.id != widget.controller.selectedAreaId)
-                  ? () => _confirmTravel(area, previewStage)
-                  : () => _returnToCurrent(data),
+              onActionPressed: previewStage == null
+                  ? () => _returnToCurrent(data)
+                  : () => _confirmTravel(area, previewStage),
             ),
           ],
         );
@@ -955,8 +1002,17 @@ class _FieldFocusOverlay extends StatelessWidget {
   Widget build(BuildContext context) {
     final size = MediaQuery.sizeOf(context);
     final portrait = size.height > size.width;
-    final width = min(size.width * (portrait ? 0.92 : 0.72), 760.0);
-    final height = min(size.height * (portrait ? 0.46 : 0.68), width * 0.92);
+    final isKurkenIsland = field.id == 'field_01_001';
+    // Only Kurken Island needs the enlarged view for its crowded landmarks.
+    final width = isKurkenIsland
+        ? min(size.width * (portrait ? 0.96 : 0.78), 820.0)
+        : min(size.width * (portrait ? 0.92 : 0.72), 760.0);
+    final height = isKurkenIsland
+        ? min(
+            size.height * (portrait ? 0.56 : 0.74),
+            width * (portrait ? 1.12 : 0.92),
+          )
+        : min(size.height * (portrait ? 0.46 : 0.68), width * 0.92);
     final fieldIndex = area.fields.indexOf(field);
     final focus = fieldMapLayout(
       areaId: area.id,
@@ -964,6 +1020,21 @@ class _FieldFocusOverlay extends StatelessWidget {
       index: fieldIndex,
       total: area.fields.length,
     );
+    final detailZoom = focus.focusScale * (isKurkenIsland ? 1.35 : 1.0);
+    final detailScale =
+        max(
+          width / worldMapLogicalSize.width,
+          height / worldMapLogicalSize.height,
+        ) *
+        detailZoom;
+    // Pan the image and its pins together, leaving room for the western labels.
+    final detailCenter = isKurkenIsland
+        ? focus.pin -
+              Offset(
+                width * 0.07 / (worldMapLogicalSize.width * detailScale),
+                0,
+              )
+        : focus.pin;
     final positions = List<Offset>.generate(field.stages.length, (index) {
       final mapPosition = stageMapPosition(
         stageId: field.stages[index].id,
@@ -973,9 +1044,9 @@ class _FieldFocusOverlay extends StatelessWidget {
       );
       return projectMapPosition(
         mapPosition: mapPosition,
-        focusPosition: focus.pin,
+        focusPosition: detailCenter,
         viewport: Size(width, height),
-        zoom: focus.focusScale,
+        zoom: detailZoom,
       );
     });
     final previewNpcs = npcs
@@ -1010,106 +1081,116 @@ class _FieldFocusOverlay extends StatelessWidget {
               opacity: value.clamp(0, 1),
               child: Transform.scale(scale: value, child: child),
             ),
-            child: SizedBox(
-              width: width,
-              height: height,
-              child: Stack(
-                clipBehavior: Clip.none,
-                children: [
-                  Positioned.fill(
-                    child: DecoratedBox(
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(height * 0.34),
-                        boxShadow: const [
-                          BoxShadow(
-                            color: Color(0x99FFB52B),
-                            blurRadius: 28,
-                            spreadRadius: 2,
-                          ),
-                          BoxShadow(
-                            color: Colors.black54,
-                            blurRadius: 34,
-                            offset: Offset(0, 14),
-                          ),
-                        ],
-                      ),
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(height * 0.34),
-                        child: Stack(
-                          fit: StackFit.expand,
-                          children: [
-                            _FocusedMapImage(
-                              asset: 'assets/world_map/areas/${area.id}.jpg',
-                              center: focus.pin,
-                              zoom: focus.focusScale,
-                            ),
-                            DecoratedBox(
-                              decoration: BoxDecoration(
-                                gradient: RadialGradient(
-                                  radius: 0.82,
-                                  colors: [
-                                    Colors.transparent,
-                                    const Color(0xFFFF9D24)
-                                        .withValues(alpha: 0.20),
-                                  ],
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-                  Positioned.fill(
-                    child: IgnorePointer(
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTapUp: (details) {
+                final index = nearestStageIndexWithinRadius(
+                  positions: positions,
+                  point: details.localPosition,
+                );
+                if (index != null) onStageSelected(field.stages[index]);
+              },
+              child: SizedBox(
+                width: width,
+                height: height,
+                child: Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    Positioned.fill(
                       child: DecoratedBox(
                         decoration: BoxDecoration(
                           borderRadius: BorderRadius.circular(height * 0.34),
-                          border: Border.all(
-                            color: const Color(0xFFFFD36A),
-                            width: 2.5,
+                          boxShadow: const [
+                            BoxShadow(
+                              color: Color(0x99FFB52B),
+                              blurRadius: 28,
+                              spreadRadius: 2,
+                            ),
+                            BoxShadow(
+                              color: Colors.black54,
+                              blurRadius: 34,
+                              offset: Offset(0, 14),
+                            ),
+                          ],
+                        ),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(height * 0.34),
+                          child: Stack(
+                            fit: StackFit.expand,
+                            children: [
+                              _FocusedMapImage(
+                                asset: 'assets/world_map/areas/${area.id}.jpg',
+                                center: detailCenter,
+                                zoom: detailZoom,
+                              ),
+                              DecoratedBox(
+                                decoration: BoxDecoration(
+                                  gradient: RadialGradient(
+                                    radius: 0.82,
+                                    colors: [
+                                      Colors.transparent,
+                                      const Color(0xFFFF9D24)
+                                          .withValues(alpha: 0.20),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ],
                           ),
                         ),
                       ),
                     ),
-                  ),
-                  for (var index = 0; index < field.stages.length; index++)
-                    _StagePin(
-                      stage: field.stages[index],
-                      language: language,
-                      position: positions[index],
-                      selected: field.stages[index].id == previewStageId,
-                      current: field.stages[index].id == currentStageId,
-                      onTap: () => onStageSelected(field.stages[index]),
-                    ),
-                  if (previewNpcs.isNotEmpty)
-                    Positioned(
-                      left: 14,
-                      top: 14,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 10,
-                          vertical: 6,
-                        ),
-                        decoration: BoxDecoration(
-                          color: Colors.black.withValues(alpha: 0.58),
-                          borderRadius: BorderRadius.circular(16),
-                          border: Border.all(color: Colors.white24),
-                        ),
-                        child: Text(
-                          language.text(
-                            '可能遇见：$localizedNpcNames',
-                            'May meet: $localizedNpcNames',
-                            '会えるかも：$localizedNpcNames',
-                          ),
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 11,
+                    Positioned.fill(
+                      child: IgnorePointer(
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(height * 0.34),
+                            border: Border.all(
+                              color: const Color(0xFFFFD36A),
+                              width: 2.5,
+                            ),
                           ),
                         ),
                       ),
                     ),
-                ],
+                    for (var index = 0; index < field.stages.length; index++)
+                      _StagePin(
+                        stage: field.stages[index],
+                        language: language,
+                        position: positions[index],
+                        selected: field.stages[index].id == previewStageId,
+                        current: field.stages[index].id == currentStageId,
+                        onTap: () => onStageSelected(field.stages[index]),
+                      ),
+                    if (previewNpcs.isNotEmpty)
+                      Positioned(
+                        left: 14,
+                        top: 14,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 6,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.black.withValues(alpha: 0.58),
+                            borderRadius: BorderRadius.circular(16),
+                            border: Border.all(color: Colors.white24),
+                          ),
+                          child: Text(
+                            language.text(
+                              '可能遇见：$localizedNpcNames',
+                              'May meet: $localizedNpcNames',
+                              '会えるかも：$localizedNpcNames',
+                            ),
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 11,
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
               ),
             ),
           ),
@@ -1142,80 +1223,90 @@ class _StagePin extends StatelessWidget {
       left: position.dx - 61,
       top: position.dy - 36,
       width: 122,
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
+      child: Semantics(
+        button: true,
+        label: localizedWorldPlaceName(
+          id: stage.id,
+          fallback: stage.name,
+          language: language,
+        ),
         onTap: onTap,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (current)
-              Container(
-                margin: const EdgeInsets.only(bottom: 3),
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                decoration: BoxDecoration(
-                  color: const Color(0xFFD94C12),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: Colors.white70),
-                ),
-                child: Text(
-                  language.text('当前地', 'Current', '現在地'),
-                  style: const TextStyle(color: Colors.white, fontSize: 10),
-                ),
-              ),
-            Container(
-              width: selected ? 31 : 27,
-              height: selected ? 31 : 27,
-              alignment: Alignment.center,
-              child: Transform.rotate(
-                angle: pi / 4,
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 180),
-                  width: selected ? 24 : 20,
-                  height: selected ? 24 : 20,
+        child: IgnorePointer(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (current)
+                Container(
+                  margin: const EdgeInsets.only(bottom: 3),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 2,
+                  ),
                   decoration: BoxDecoration(
-                    color: selected
-                        ? const Color(0xFFFF8A22)
-                        : const Color(0xFFF34B37),
-                    borderRadius: BorderRadius.circular(4),
-                    border: Border.all(color: Colors.white, width: 2.5),
-                    boxShadow: const [
-                      BoxShadow(color: Colors.black54, blurRadius: 7),
-                    ],
+                    color: const Color(0xFFD94C12),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: Colors.white70),
+                  ),
+                  child: Text(
+                    language.text('当前地', 'Current', '現在地'),
+                    style: const TextStyle(color: Colors.white, fontSize: 10),
+                  ),
+                ),
+              Container(
+                width: selected ? 31 : 27,
+                height: selected ? 31 : 27,
+                alignment: Alignment.center,
+                child: Transform.rotate(
+                  angle: pi / 4,
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 180),
+                    width: selected ? 24 : 20,
+                    height: selected ? 24 : 20,
+                    decoration: BoxDecoration(
+                      color: selected
+                          ? const Color(0xFFFF8A22)
+                          : const Color(0xFFF34B37),
+                      borderRadius: BorderRadius.circular(4),
+                      border: Border.all(color: Colors.white, width: 2.5),
+                      boxShadow: const [
+                        BoxShadow(color: Colors.black54, blurRadius: 7),
+                      ],
+                    ),
                   ),
                 ),
               ),
-            ),
-            const SizedBox(height: 3),
-            AnimatedContainer(
-              duration: const Duration(milliseconds: 180),
-              constraints: const BoxConstraints(maxWidth: 122),
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              decoration: BoxDecoration(
-                color: selected
-                    ? const Color(0xE636241B)
-                    : Colors.black.withValues(alpha: 0.78),
-                borderRadius: BorderRadius.circular(7),
-                border: Border.all(
-                  color: selected ? const Color(0xFFFFC05A) : Colors.white24,
+              const SizedBox(height: 3),
+              AnimatedContainer(
+                duration: const Duration(milliseconds: 180),
+                constraints: const BoxConstraints(maxWidth: 122),
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: selected
+                      ? const Color(0xE636241B)
+                      : Colors.black.withValues(alpha: 0.78),
+                  borderRadius: BorderRadius.circular(7),
+                  border: Border.all(
+                    color: selected ? const Color(0xFFFFC05A) : Colors.white24,
+                  ),
+                ),
+                child: Text(
+                  localizedWorldPlaceName(
+                    id: stage.id,
+                    fallback: stage.name,
+                    language: language,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
               ),
-              child: Text(
-                localizedWorldPlaceName(
-                  id: stage.id,
-                  fallback: stage.name,
-                  language: language,
-                ),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                textAlign: TextAlign.center,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -1344,6 +1435,7 @@ class _MapBottomBar extends StatelessWidget {
     required this.liquidGlass,
     required this.language,
     required this.canTravel,
+    required this.canEnterScene,
     required this.onAreaPressed,
     required this.onActionPressed,
   });
@@ -1352,6 +1444,7 @@ class _MapBottomBar extends StatelessWidget {
   final bool liquidGlass;
   final AppLanguage language;
   final bool canTravel;
+  final bool canEnterScene;
   final VoidCallback onAreaPressed;
   final VoidCallback onActionPressed;
 
@@ -1402,15 +1495,39 @@ class _MapBottomBar extends StatelessWidget {
                 liquidGlass: liquidGlass,
                 onTap: onActionPressed,
                 child: Center(
-                  child: Text(
-                    canTravel
-                        ? language.text('前往', 'Travel', '移動')
-                        : language.text('当前地', 'Current', '現在地'),
-                    style: TextStyle(
-                      color: canTravel ? const Color(0xFFFFC437) : Colors.white,
-                      fontSize: 15,
-                      fontWeight: FontWeight.w700,
-                    ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        canTravel
+                            ? Icons.directions_walk_rounded
+                            : canEnterScene
+                            ? Icons.landscape_rounded
+                            : Icons.my_location_rounded,
+                        size: 19,
+                        color: canEnterScene
+                            ? const Color(0xFFFFC437)
+                            : Colors.white,
+                      ),
+                      const SizedBox(width: 6),
+                      Flexible(
+                        child: Text(
+                          canTravel
+                              ? language.text('前往', 'Travel', '移動')
+                              : canEnterScene
+                              ? language.text('进入', 'Enter', '入る')
+                              : language.text('当前地', 'Current', '現在地'),
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: canEnterScene
+                                ? const Color(0xFFFFC437)
+                                : Colors.white,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ),
