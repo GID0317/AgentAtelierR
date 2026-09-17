@@ -984,6 +984,7 @@ class SettingsScreenState extends State<SettingsScreen> {
         narratorLanguage: controller.narratorLanguage,
         characterReplyLanguage: controller.characterReplyLanguage,
         translationLanguage: controller.translationLanguage,
+        translationOnly: controller.translationOnly,
       ),
     );
     if (result == null) return;
@@ -993,6 +994,7 @@ class SettingsScreenState extends State<SettingsScreen> {
       characterReply: result.characterReplyLanguage,
       translation: result.translationLanguage,
     );
+    controller.setTranslationOnly(result.translationOnly);
   }
 
   Future<void> _confirmClearHistory(BuildContext context) async {
@@ -1079,6 +1081,28 @@ class SettingsScreenState extends State<SettingsScreen> {
                       title: Text(accent.label(language)),
                       selected: controller.accentTheme == accent,
                       onTap: () => controller.setAccentTheme(accent),
+                    ),
+                  const Divider(),
+                  Text(language.text('文字颜色', 'Text color', '文字色')),
+                  ListTile(
+                    title: Text(
+                      language.text('跟随主题', 'Follow theme', 'テーマに合わせる'),
+                    ),
+                    selected: controller.textColorTheme == null,
+                    onTap: () => controller.setTextColorTheme(null),
+                  ),
+                  for (final color in AppAccentTheme.values)
+                    ListTile(
+                      key: ValueKey('text-color-${color.name}'),
+                      leading: CircleAvatar(
+                        backgroundColor: color.color,
+                        child: controller.textColorTheme == color
+                            ? const Icon(Icons.check, color: Colors.white)
+                            : null,
+                      ),
+                      title: Text(color.label(language)),
+                      selected: controller.textColorTheme == color,
+                      onTap: () => controller.setTextColorTheme(color),
                     ),
                 ],
               ),
@@ -2516,12 +2540,14 @@ class _LanguageSettingsDraft {
     required this.narratorLanguage,
     required this.characterReplyLanguage,
     required this.translationLanguage,
+    required this.translationOnly,
   });
 
   final AppLanguage interfaceLanguage;
   final AppLanguage narratorLanguage;
   final AppLanguage characterReplyLanguage;
   final TranslationLanguage translationLanguage;
+  final bool translationOnly;
 }
 
 class _LanguageSettingsDialog extends StatefulWidget {
@@ -2530,12 +2556,14 @@ class _LanguageSettingsDialog extends StatefulWidget {
     required this.narratorLanguage,
     required this.characterReplyLanguage,
     required this.translationLanguage,
+    required this.translationOnly,
   });
 
   final AppLanguage interfaceLanguage;
   final AppLanguage narratorLanguage;
   final AppLanguage characterReplyLanguage;
   final TranslationLanguage translationLanguage;
+  final bool translationOnly;
 
   @override
   State<_LanguageSettingsDialog> createState() =>
@@ -2547,6 +2575,7 @@ class _LanguageSettingsDialogState extends State<_LanguageSettingsDialog> {
   late AppLanguage _narratorLanguage;
   late AppLanguage _characterReplyLanguage;
   late TranslationLanguage _translationLanguage;
+  late bool _translationOnly;
 
   @override
   void initState() {
@@ -2555,6 +2584,7 @@ class _LanguageSettingsDialogState extends State<_LanguageSettingsDialog> {
     _narratorLanguage = widget.narratorLanguage;
     _characterReplyLanguage = widget.characterReplyLanguage;
     _translationLanguage = widget.translationLanguage;
+    _translationOnly = widget.translationOnly;
   }
 
   @override
@@ -2616,6 +2646,20 @@ class _LanguageSettingsDialogState extends State<_LanguageSettingsDialog> {
                 },
               ),
               const SizedBox(height: 7),
+              SwitchListTile(
+                title: Text(
+                  language.text('只显示翻译语言', 'Show translation only', '翻訳のみ表示'),
+                ),
+                subtitle: Text(
+                  language.text(
+                    '仅隐藏对话框内的角色原文；原始输出、记录和语音保持不变。请选择翻译语言。',
+                    'Hides original dialogue only. Output, saved text and speech are unchanged. Select a translation language.',
+                    '会話の原文のみ非表示。記録と音声は変わりません。翻訳言語を選択してください。',
+                  ),
+                ),
+                value: _translationOnly,
+                onChanged: (value) => setState(() => _translationOnly = value),
+              ),
               Align(
                 alignment: Alignment.centerLeft,
                 child: Text(
@@ -2646,6 +2690,7 @@ class _LanguageSettingsDialogState extends State<_LanguageSettingsDialog> {
               narratorLanguage: _narratorLanguage,
               characterReplyLanguage: _characterReplyLanguage,
               translationLanguage: _translationLanguage,
+              translationOnly: _translationOnly,
             ),
           ),
           child: Text(language.text('保存', 'Save', '保存')),

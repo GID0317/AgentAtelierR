@@ -28,6 +28,53 @@ extension AppAccentThemeData on AppAccentTheme {
 
 final _themes = <(AppAccentTheme, Brightness), ThemeData>{};
 
+class DialogueAppearance extends ThemeExtension<DialogueAppearance> {
+  const DialogueAppearance({this.translationOnly = false, this.textColor});
+  final bool translationOnly;
+  final Color? textColor;
+  @override
+  DialogueAppearance copyWith({bool? translationOnly, Color? textColor}) =>
+      DialogueAppearance(
+        translationOnly: translationOnly ?? this.translationOnly,
+        textColor: textColor ?? this.textColor,
+      );
+  @override
+  DialogueAppearance lerp(covariant DialogueAppearance? other, double t) =>
+      other == null
+      ? this
+      : DialogueAppearance(
+          translationOnly: other.translationOnly,
+          textColor: Color.lerp(textColor, other.textColor, t),
+        );
+}
+
+ThemeData withDialogueAppearance(
+  ThemeData theme,
+  AppAccentTheme? text,
+  bool translationOnly,
+) {
+  final color = text == null
+      ? null
+      : theme.brightness == Brightness.dark
+      ? Color.lerp(text.color, Colors.white, 0.65)!
+      : text.color;
+  return theme.copyWith(
+    colorScheme: color == null
+        ? theme.colorScheme
+        : theme.colorScheme.copyWith(
+            onSurface: color,
+            onSurfaceVariant: color.withValues(alpha: 0.8),
+          ),
+    textTheme: color == null
+        ? theme.textTheme
+        : theme.textTheme.apply(bodyColor: color, displayColor: color),
+    extensions: [
+      ...theme.extensions.values,
+      DialogueAppearance(translationOnly: translationOnly, textColor: color),
+    ],
+  );
+}
+
 ThemeData atelierTheme(
   AppAccentTheme accent,
   Brightness brightness,

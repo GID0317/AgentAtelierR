@@ -733,3 +733,12 @@ String conversationTextForAssistantResponse(
 }) {
   return showRawOutput ? response : displayTextForAssistantResponse(response);
 }
+
+/// Display indices only: never remove original segments from storage or speech.
+List<int> dialogueDisplayIndices(
+  List<ChatSegment> segments,
+  bool translationOnly,
+) => [
+  for (var i = 0; i < segments.length; i++)
+    if (!translationOnly || segments[i].speaker == ChatSpeaker.translation) i,
+];

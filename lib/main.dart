@@ -175,8 +175,18 @@ class AgentAtelierRApp extends StatelessWidget {
       builder: (context, _) => MaterialApp(
         debugShowCheckedModeBanner: false,
         title: 'AgentAtelierR',
-        theme: atelierTheme(controller.accentTheme, Brightness.light),
-        darkTheme: atelierTheme(controller.accentTheme, Brightness.dark),
+        theme: withDialogueAppearance(
+          atelierTheme(controller.accentTheme, Brightness.light),
+          controller.textColorTheme,
+          controller.translationOnly &&
+              controller.translationLanguage.name != 'none',
+        ),
+        darkTheme: withDialogueAppearance(
+          atelierTheme(controller.accentTheme, Brightness.dark),
+          controller.textColorTheme,
+          controller.translationOnly &&
+              controller.translationLanguage.name != 'none',
+        ),
         themeMode: switch (controller.themePreference) {
           AppThemePreference.system => ThemeMode.system,
           AppThemePreference.light => ThemeMode.light,

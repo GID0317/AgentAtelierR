@@ -712,6 +712,8 @@ class AppController extends ChangeNotifier {
   AppFrameRateMode frameRateMode = AppFrameRateMode.adaptive;
   AppThemePreference themePreference = AppThemePreference.system;
   AppAccentTheme accentTheme = AppAccentTheme.jade;
+  AppAccentTheme? textColorTheme;
+  bool translationOnly = false;
   AppLanguage interfaceLanguage = AppLanguage.chinese;
   AppLanguage narratorLanguage = AppLanguage.chinese;
   AppLanguage characterReplyLanguage = AppLanguage.chinese;
@@ -963,6 +965,12 @@ class AppController extends ChangeNotifier {
       (value) => value.name == _preferences.getString('frame_rate_mode'),
       orElse: () => AppFrameRateMode.adaptive,
     );
+    translationOnly = _preferences.getBool('translation_only') ?? false;
+    textColorTheme = AppAccentTheme.values
+        .where(
+          (value) => value.name == _preferences.getString('text_color_theme'),
+        )
+        .firstOrNull;
     themePreference = AppThemePreference.values.firstWhere(
       (value) => value.name == _preferences.getString('theme_preference'),
       orElse: () => AppThemePreference.system,
@@ -2266,6 +2274,8 @@ ${longTermMemoryEnabled ? (agentEnabled ? '需要回忆过往事件、约定或�
     'frameRateMode': frameRateMode.name,
     'themePreference': themePreference.name,
     'accentTheme': accentTheme.name,
+    'textColorTheme': textColorTheme?.name,
+    'translationOnly': translationOnly,
     'interfaceLanguage': interfaceLanguage.name,
     'narratorLanguage': narratorLanguage.name,
     'characterReplyLanguage': characterReplyLanguage.name,
@@ -2624,6 +2634,10 @@ ${longTermMemoryEnabled ? (agentEnabled ? '需要回忆过往事件、约定或�
       (value) => value.name == data['themePreference'],
       orElse: () => AppThemePreference.system,
     );
+    translationOnly = data['translationOnly'] == true;
+    textColorTheme = AppAccentTheme.values
+        .where((value) => value.name == data['textColorTheme'])
+        .firstOrNull;
     accentTheme = AppAccentTheme.values.firstWhere(
       (v) => v.name == data['accentTheme'],
       orElse: () => AppAccentTheme.jade,
@@ -3381,6 +3395,16 @@ ${longTermMemoryEnabled ? (agentEnabled ? '需要回忆过往事件、约定或�
     _changed();
   }
 
+  void setTextColorTheme(AppAccentTheme? value) {
+    textColorTheme = value;
+    _changed();
+  }
+
+  void setTranslationOnly(bool value) {
+    translationOnly = value;
+    _changed();
+  }
+
   void configureLanguages({
     required AppLanguage interface,
     required AppLanguage narrator,
@@ -3500,6 +3524,8 @@ ${longTermMemoryEnabled ? (agentEnabled ? '需要回忆过往事件、约定或�
   Future<void> _save() async {
     await Future.wait<void>([
       _preferences.setString('accent_theme', accentTheme.name),
+      _preferences.setString('text_color_theme', textColorTheme?.name ?? ''),
+      _preferences.setBool('translation_only', translationOnly),
       _preferences.setString(
         'settings_slots_v1',
         jsonEncode(_settingsSlotsJson),

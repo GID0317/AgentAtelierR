@@ -13,6 +13,7 @@ import 'package:spine_flutter/spine_flutter.dart' hide Color;
 
 import 'ai_services.dart';
 import 'app_controller.dart';
+import 'app_theme.dart';
 import 'app_localization.dart';
 import 'attachment_thumbnail_store.dart';
 import 'audio_envelope.dart';
@@ -5408,9 +5409,13 @@ class _NarratorRun extends StatelessWidget {
             child: Text(
               segments.map(displayTextForAssistantSegment).join('\n'),
               style: TextStyle(
-                color: glass
-                    ? Colors.white70
-                    : Theme.of(context).colorScheme.onSurfaceVariant,
+                color:
+                    Theme.of(context)
+                        .extension<DialogueAppearance>()
+                        ?.textColor ??
+                    (glass
+                        ? Colors.white70
+                        : Theme.of(context).colorScheme.onSurfaceVariant),
                 fontSize: 13,
                 fontStyle: FontStyle.italic,
                 height: 1.38,
@@ -5605,11 +5610,16 @@ class _DialogueSegmentBody extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final appearance = Theme.of(context).extension<DialogueAppearance>();
+    final visibleIndices = dialogueDisplayIndices(
+      segments,
+      appearance?.translationOnly == true,
+    );
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        for (var index = 0; index < segments.length; index++) ...[
-          if (index > 0)
+        for (final index in visibleIndices) ...[
+          if (index != visibleIndices.first)
             Divider(
               height: 17,
               thickness: 1,
@@ -5624,9 +5634,11 @@ class _DialogueSegmentBody extends StatelessWidget {
               '${segments[index].speaker == ChatSpeaker.translation ? '译文：' : ''}'
               '${displayTextForAssistantSegment(segments[index])}',
               style: TextStyle(
-                color: glass
-                    ? Colors.white
-                    : Theme.of(context).colorScheme.onSurface,
+                color:
+                    appearance?.textColor ??
+                    (glass
+                        ? Colors.white
+                        : Theme.of(context).colorScheme.onSurface),
                 fontSize: 14,
                 height: 1.4,
               ),
