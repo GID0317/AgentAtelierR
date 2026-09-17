@@ -27,6 +27,20 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "agent_atelier_r/speech_envelope")
+            .setMethodCallHandler { call, result ->
+                if (call.method != "analyze") { result.notImplemented(); return@setMethodCallHandler }
+                val path = call.argument<String>("path")
+                if (path == null) { result.error("path", "Missing audio path", null); return@setMethodCallHandler }
+                Thread {
+                    try {
+                        val values = SpeechEnvelope.decode(path)
+                        mainHandler.post { result.success(values) }
+                    } catch (error: Exception) {
+                        mainHandler.post { result.error("decode", error.message, null) }
+                    }
+                }.start()
+            }
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
             .setMethodCallHandler { call, result ->
                 when (call.method) {

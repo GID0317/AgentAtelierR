@@ -9,9 +9,8 @@ String restoreMissingIdleDrivers(String source, String reference) {
   final gesture = current['emotionalGesture'] as Map<String, dynamic>?;
   final fallback = original['emotionalGesture'] as Map<String, dynamic>?;
   if (gesture == null || fallback == null) return source;
-  if (gesture.containsKey('DriverDefs')) return source;
   if (fallback['DriverDefs'] is! List) return source;
-  gesture['DriverDefs'] = fallback['DriverDefs'];
+  gesture.putIfAbsent('DriverDefs', () => fallback['DriverDefs']);
   final profiles = gesture['EmotionProfilesV4'] as Map? ?? {};
   final originalProfiles = fallback['EmotionProfilesV4'] as Map? ?? {};
   for (final entry in profiles.entries) {

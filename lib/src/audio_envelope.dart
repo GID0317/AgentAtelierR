@@ -99,11 +99,28 @@ class AudioAmplitudeEnvelope {
     }
     if (raw.isEmpty) return null;
 
+    return AudioAmplitudeEnvelope.fromRms(raw, frameDuration: frameDuration);
+  }
+
+  factory AudioAmplitudeEnvelope.fromRms(
+    List<double> samples, {
+    Duration frameDuration = const Duration(milliseconds: 20),
+  }) {
+    final raw = samples.map((v) => v.isFinite ? max(0.0, v) : 0.0).toList();
+    if (raw.isEmpty) {
+      return AudioAmplitudeEnvelope(
+        frameDuration: frameDuration,
+        values: const [],
+      );
+    }
+
     final sorted = [...raw]..sort();
     final peak =
         sorted[(sorted.length * 0.95).floor().clamp(0, sorted.length - 1)];
-    final noise =
-        sorted[(sorted.length * 0.12).floor().clamp(0, sorted.length - 1)];
+    final noise = min(
+      peak * 0.15,
+      sorted[(sorted.length * 0.12).floor().clamp(0, sorted.length - 1)],
+    );
     final range = max(peak - noise, 0.000001);
     final normalized = raw
         .map(
@@ -116,60 +133,16 @@ class AudioAmplitudeEnvelope {
     final values = <double>[];
     for (final value in normalized) {
       // Mirrors the source gesture profile: fast attack and slower release.
-      final factor = value > smoothed ? 0.68 : 0.3;
+      final factor = value > smoothed ? 0.85 : 0.65;
       smoothed += (value - smoothed) * factor;
+      if (value < 0.02 && smoothed < 0.08) smoothed = 0;
       values.add(smoothed.clamp(0.0, 1.0));
     }
     return AudioAmplitudeEnvelope(
       frameDuration: frameDuration,
-      values: List<double>.unmodifiable(
-        _applyLipSyncClosures(values, frameDuration),
-      ),
+      // Follow real amplitude troughs; do not invent periodic silent frames.
+      values: List<double>.unmodifiable(values),
     );
-  }
-
-  static List<double> _applyLipSyncClosures(
-    List<double> values,
-    Duration frameDuration,
-  ) {
-    if (values.isEmpty) return values;
-    final frameMs = max(1, frameDuration.inMilliseconds);
-    final minOpenFrames = max(1, (120 / frameMs).ceil());
-    final maxOpenFrames = max(minOpenFrames + 1, (240 / frameMs).ceil());
-    final closureFrames = max(1, (60 / frameMs).ceil());
-    final result = [...values];
-    var cursor = 0;
-    while (cursor < result.length && result[cursor] < 0.1) {
-      cursor += 1;
-    }
-    while (cursor + minOpenFrames < result.length) {
-      final searchStart = cursor + minOpenFrames;
-      final searchEnd = min(cursor + maxOpenFrames, result.length - 1);
-      var localPeak = 0.0;
-      var dipIndex = searchStart;
-      for (var index = cursor; index <= searchEnd; index++) {
-        localPeak = max(localPeak, values[index]);
-        if (index >= searchStart && values[index] < values[dipIndex]) {
-          dipIndex = index;
-        }
-      }
-      if (localPeak < 0.12) {
-        cursor = searchEnd + 1;
-        while (cursor < result.length && result[cursor] < 0.1) {
-          cursor += 1;
-        }
-        continue;
-      }
-      for (
-        var index = dipIndex;
-        index < min(dipIndex + closureFrames, result.length);
-        index++
-      ) {
-        result[index] = 0;
-      }
-      cursor = dipIndex + closureFrames;
-    }
-    return result;
   }
 
   static double? _readSample(

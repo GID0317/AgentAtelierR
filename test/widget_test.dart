@@ -844,7 +844,7 @@ void main() {
     final voicedFrames = envelope.values.skip(envelope.values.length ~/ 2);
     expect(
       voicedFrames.where((value) => value == 0).length,
-      greaterThanOrEqualTo(2),
+      0,
     );
     expect(voicedFrames.where((value) => value > 0.5), isNotEmpty);
     expect(envelope.values.every((value) => value >= 0 && value <= 1), isTrue);

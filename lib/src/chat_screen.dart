@@ -16,6 +16,7 @@ import 'app_controller.dart';
 import 'app_localization.dart';
 import 'attachment_thumbnail_store.dart';
 import 'audio_envelope.dart';
+import 'speech_envelope_loader.dart';
 import 'character_speech_driver.dart';
 import 'character_resource_behavior.dart';
 import 'character_motion_dynamics.dart';
@@ -430,8 +431,9 @@ class _ChatScreenState extends State<ChatScreen> {
       _scheduleIdleChange();
       _scheduleMicroMotion();
       _scheduleCharacterBlink();
-    } on Object {
+    } on Object catch (error, stack) {
       if (generation == _motionLoadGeneration) _motionGroups = const [];
+      RuntimeLog.instance.error('CharacterMotion', error, stack);
     }
   }
 
@@ -1123,7 +1125,7 @@ class _ChatScreenState extends State<ChatScreen> {
         : (state.setAnimationByName(_windTrack, name, true)
             ..setMixBlend(MixBlend.replace)
             ..setMixDuration(0.6)
-            ..setTimeScale(0.65));
+            ..setTimeScale(1.0));
     // This authored clip keys physics wind only. Replace avoids additive
     // accumulation; fading alpha scales it against the authored setup wind.
     entry.setAlpha(strength);
@@ -2489,7 +2491,7 @@ class _ChatScreenState extends State<ChatScreen> {
     );
     return _PreparedSpeech(
       path: path,
-      envelope: AudioAmplitudeEnvelope.tryParseWav(bytes),
+      envelope: await loadSpeechEnvelope(path, bytes),
     );
   }
 

@@ -1,8 +1,11 @@
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import 'protected_asset_format.dart';
 import 'local_skin_store.dart';
+import 'character_idle_behavior.dart';
 
 class ProtectedCharacterAssetBundle extends CachingAssetBundle {
   ProtectedCharacterAssetBundle(this._files);
@@ -75,7 +78,28 @@ class ProtectedCharacterAssets {
     String assetName,
   ) async {
     final local = await LocalSkinStore.instance.filesFor(assetName);
-    if (local != null) return local;
+    if (local != null) {
+      final record = LocalSkinStore.instance.skins.firstWhere(
+        (skin) => skin['id'] == assetName,
+      );
+      final base = record['base']!;
+      // Restore only known-compatible Ryza rigs from their encrypted base pack.
+      if (RegExp(r'^crf_skn_002_000[1-5]_(01|99)$').hasMatch(base)) {
+        final reference = await originalFilesFor(base);
+        final path =
+            'assets/character/ryza/$assetName/${assetName}_gesture.json';
+        final basePath = 'assets/character/ryza/$base/${base}_gesture.json';
+        local[path] = Uint8List.fromList(
+          utf8.encode(
+            restoreMissingIdleDrivers(
+              utf8.decode(local[path]!),
+              utf8.decode(reference[basePath]!),
+            ),
+          ),
+        );
+      }
+      return local;
+    }
     final key = _key();
     final encrypted = await _loadRootBytes(
       'assets/protected/character/$assetName.aarpack',

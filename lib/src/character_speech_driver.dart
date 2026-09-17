@@ -270,7 +270,7 @@ class CharacterPerformanceDirector {
         : speaking
         ? 0.85
         : _usingBindings
-        ? 0.55
+        ? 0.8
         : 0.30;
     // Mouth energy includes syllable-rate pulses, especially the Android
     // fallback envelope. It must not shake the head/body. Keep the argument
