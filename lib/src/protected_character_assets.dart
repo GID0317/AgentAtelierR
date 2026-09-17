@@ -2,9 +2,26 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import 'protected_asset_format.dart';
+import 'local_skin_store.dart';
 
 class ProtectedCharacterAssetBundle extends CachingAssetBundle {
   ProtectedCharacterAssetBundle(this._files);
+
+  factory ProtectedCharacterAssetBundle.withTexture(
+    Map<String, Uint8List> original,
+    Uint8List? texture,
+  ) {
+    // Decrypted packs deliberately expose an immutable map. Never mutate it.
+    final files = Map<String, Uint8List>.of(original);
+    if (texture != null) {
+      final pages = files.keys.where((key) => key.endsWith('.png')).toList();
+      if (pages.length != 1) {
+        throw FlutterError('Expected one character texture page');
+      }
+      files[pages.single] = texture;
+    }
+    return ProtectedCharacterAssetBundle(files);
+  }
 
   final Map<String, Uint8List> _files;
 
@@ -49,6 +66,16 @@ class ProtectedCharacterAssets {
   static Future<ProtectedCharacterAssetBundle> _loadBundle(
     String assetName,
   ) async {
+    final files = await originalFilesFor(assetName);
+    final texture = await LocalSkinStore.instance.textureFor(assetName);
+    return ProtectedCharacterAssetBundle.withTexture(files, texture);
+  }
+
+  static Future<Map<String, Uint8List>> originalFilesFor(
+    String assetName,
+  ) async {
+    final local = await LocalSkinStore.instance.filesFor(assetName);
+    if (local != null) return local;
     final key = _key();
     final encrypted = await _loadRootBytes(
       'assets/protected/character/$assetName.aarpack',
@@ -58,7 +85,7 @@ class ProtectedCharacterAssets {
       key: key,
       packId: 'character/$assetName',
     );
-    return ProtectedCharacterAssetBundle(files);
+    return files;
   }
 
   static Future<Uint8List> _loadPreview(String assetName) async {
@@ -94,7 +121,6 @@ class ProtectedCharacterAssets {
     return data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes);
   }
 
-  @visibleForTesting
   static void clearCache() {
     _activeAssetName = null;
     _activeBundle = null;

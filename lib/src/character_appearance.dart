@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 
 import 'character_expression.dart';
 import 'protected_character_assets.dart';
+import 'local_skin_store.dart';
 
 class CharacterAppearance {
   const CharacterAppearance({
@@ -16,6 +17,7 @@ class CharacterAppearance {
     required this.animated,
     required this.idleAnimations,
     this.hasPreview = true,
+    this.baseAppearanceId,
   });
 
   final String id;
@@ -26,6 +28,8 @@ class CharacterAppearance {
   final bool animated;
   final List<String> idleAnimations;
   final bool hasPreview;
+  final String? baseAppearanceId;
+  bool get isStanding => (baseAppearanceId ?? id) == 'standing_99';
 
   String get previewAsset => 'assets/images/skins/$assetName.png';
   String get assetRoot => 'assets/character/ryza/$assetName';
@@ -34,7 +38,7 @@ class CharacterAppearance {
   String get gestureAsset => '$assetRoot/${assetName}_gesture.json';
 }
 
-const characterAppearances = <CharacterAppearance>[
+final characterAppearances = <CharacterAppearance>[
   CharacterAppearance(
     id: 'seated_01',
     label: '常服·坐姿',
@@ -135,6 +139,32 @@ const characterAppearances = <CharacterAppearance>[
     ],
   ),
 ];
+
+void registerLocalSkinAppearances() {
+  for (final record in LocalSkinStore.instance.skins) {
+    if (characterAppearances.any(
+      (appearance) => appearance.id == record['id'],
+    )) {
+      continue;
+    }
+    final base = characterAppearances
+        .where((appearance) => appearance.assetName == record['base'])
+        .firstOrNull;
+    characterAppearances.add(
+      CharacterAppearance(
+        id: record['id']!,
+        label: record['label']!,
+        description: '本地导入皮肤',
+        promptDescription: '当前使用用户导入的皮肤，未提供具体外观描述，不要猜测服装细节。',
+        assetName: record['id']!,
+        animated: true,
+        hasPreview: false,
+        baseAppearanceId: base?.id,
+        idleAnimations: base?.idleAnimations ?? const ['motion_A_001_idle'],
+      ),
+    );
+  }
+}
 
 const characterOneShotAnimations = <String>[
   'motion_oneshot_D_001_active',

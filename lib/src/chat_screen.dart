@@ -41,6 +41,8 @@ import 'runtime_log.dart';
 import 'ryza_loading_indicator.dart';
 import 'tap_reaction.dart';
 import 'tts_text_normalizer.dart';
+import 'skin_import_controls.dart';
+import 'character_spine_view.dart';
 
 extension SceneTimeIcon on SceneTime {
   IconData get icon => switch (this) {
@@ -325,7 +327,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _seatObjectController.targetFramesPerSecond = target;
   }
 
-  void _handleControllerChange() {
+  void _handleControllerChange({bool forceAppearanceReload = false}) {
     if (_observedDataRevision != widget.controller.dataRevision) {
       _observedDataRevision = widget.controller.dataRevision;
       _resetConversationWorkForDataReplacement();
@@ -334,7 +336,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final next = characterAppearanceById(
       widget.controller.selectedCharacterAppearanceId,
     );
-    if (next.id == _appearance.id) return;
+    if (next.id == _appearance.id && !forceAppearanceReload) return;
     _clearPerformanceQueue();
     _lipSyncEntry = null;
     _gazeHeld = false;
@@ -634,7 +636,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final spineController = _spineController;
     final ready =
         _spineReady && spineController != null && _motionGroups.isNotEmpty;
-    final posture = _appearance.id == 'standing_99' ? 'standing' : 'sitting';
+    final posture = _appearance.isStanding ? 'standing' : 'sitting';
     final poseIndex = _currentIdleAnimation == null
         ? -1
         : _appearance.idleAnimations.indexOf(_currentIdleAnimation!);
@@ -683,7 +685,10 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   List<String> _runtimeActionCapabilities(CharacterAction action) {
-    final plan = characterActionPlan(_appearance.id, action);
+    final plan = characterActionPlan(
+      _appearance.baseAppearanceId ?? _appearance.id,
+      action,
+    );
     final details = <String>[];
     final seenDetails = <String>{};
     void addDetail(String value) {
@@ -885,7 +890,10 @@ class _ChatScreenState extends State<ChatScreen> {
     _spineController!.animationState
         .getCurrent(0)
         ?.setTimeScale(_resourceEmotion?.baseAnimTimeScale ?? 1);
-    final preset = characterExpressionPreset(_appearance.id, expression);
+    final preset = characterExpressionPreset(
+      _appearance.baseAppearanceId ?? _appearance.id,
+      expression,
+    );
     _selectResourceExpression();
     _applyFacialDetails();
     if (_isCharacterSpeaking) {
@@ -924,19 +932,19 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     _setFacialEffect(
       14,
-      _appearance.id == 'standing_99'
+      _appearance.isStanding
           ? 'facial_add_blush_off'
           : 'facial_add_blush_000_off',
       preset.blush,
     );
     _setFacialEffect(
       15,
-      _appearance.id == 'standing_99'
+      _appearance.isStanding
           ? 'facial_add_tear_off'
           : 'facial_add_tear_000_off',
       preset.tear,
     );
-    if (_appearance.id != 'standing_99') {
+    if (!_appearance.isStanding) {
       _spineController!.animationState.clearTrack(16);
     }
     if (_blinkTimer?.isActive != true) _scheduleCharacterBlink();
@@ -976,11 +984,14 @@ class _ChatScreenState extends State<ChatScreen> {
   String get _openEye =>
       _resolveResourceClip(_activeResourceExpression?.eyeOpen) ??
       _activeFacialDetail?.eye ??
-      characterExpressionPreset(_appearance.id, _currentExpression).eye;
+      characterExpressionPreset(
+        _appearance.baseAppearanceId ?? _appearance.id,
+        _currentExpression,
+      ).eye;
 
   void _applyFacialDetails() {
     final preset = characterExpressionPreset(
-      _appearance.id,
+      _appearance.baseAppearanceId ?? _appearance.id,
       _currentExpression,
     );
     _setFacialAnimation(
@@ -1368,7 +1379,10 @@ class _ChatScreenState extends State<ChatScreen> {
       return;
     }
     final candidates =
-        characterFacialDetails(_appearance.id, _currentExpression)
+        characterFacialDetails(
+              _appearance.baseAppearanceId ?? _appearance.id,
+              _currentExpression,
+            )
             .where(
               (detail) =>
                   skeletonData.findAnimation(detail.eye) != null &&
@@ -1409,7 +1423,10 @@ class _ChatScreenState extends State<ChatScreen> {
       _scheduleCharacterBlink();
       return;
     }
-    final details = characterFacialDetails(_appearance.id, _currentExpression);
+    final details = characterFacialDetails(
+      _appearance.baseAppearanceId ?? _appearance.id,
+      _currentExpression,
+    );
     final detail =
         _activeFacialDetail ?? (details.isEmpty ? null : details.first);
     final closedEye =
@@ -1676,7 +1693,10 @@ class _ChatScreenState extends State<ChatScreen> {
       // An authored empty/disabled binding means no gesture for this attitude.
       return;
     }
-    final plan = characterActionPlan(_appearance.id, action);
+    final plan = characterActionPlan(
+      _appearance.baseAppearanceId ?? _appearance.id,
+      action,
+    );
     final candidates = _motionGroups
         .where(
           (group) =>
@@ -3024,6 +3044,10 @@ importance 使用 1-5。誓言/承诺用 promise，告白用 confession，严重
       builder: (context) => _AppearancePickerSheet(
         liquidGlass: widget.controller.liquidGlassChatUi,
         selectedId: _appearance.id,
+        language: widget.controller.interfaceLanguage,
+        onTextureChanged: () {
+          if (mounted) _handleControllerChange(forceAppearanceReload: true);
+        },
         onSelected: (appearance) {
           final previous = _appearance;
           widget.controller.setCharacterAppearance(appearance.id);
@@ -3292,6 +3316,7 @@ importance 使用 1-5。誓言/承诺用 promise，告白用 confession，严重
     final spineController = _spineController;
     if (spineController == null) return const SizedBox.shrink();
     return FutureBuilder<ProtectedCharacterAssetBundle>(
+      key: ObjectKey(_appearanceBundleFuture),
       future: _appearanceBundleFuture,
       builder: (context, snapshot) {
         if (snapshot.hasError) {
@@ -3306,7 +3331,7 @@ importance 使用 1-5。誓言/承诺用 promise，告白用 confession，严重
                 child: const Padding(
                   padding: EdgeInsets.all(14),
                   child: Text(
-                    '服装资源读取失败\n请使用保护构建脚本重新打包',
+                    '服装资源读取失败\n请重新选择皮肤并查看运行日志',
                     textAlign: TextAlign.center,
                     style: TextStyle(color: Colors.white),
                   ),
@@ -3315,7 +3340,9 @@ importance 使用 1-5。誓言/承诺用 promise，告白用 confession，严重
             ),
           );
         }
-        final bundle = snapshot.data;
+        final bundle = snapshot.connectionState == ConnectionState.done
+            ? snapshot.data
+            : null;
         if (bundle == null) {
           return const SizedBox.shrink();
         }
@@ -3323,14 +3350,12 @@ importance 使用 1-5。誓言/承诺用 promise，告白用 confession，严重
           fit: StackFit.expand,
           clipBehavior: Clip.none,
           children: [
-            SpineWidget.fromAsset(
-              _appearance.atlasAsset,
-              _appearance.skeletonAsset,
-              spineController,
+            CharacterSpineView(
+              atlas: _appearance.atlasAsset,
+              skeleton: _appearance.skeletonAsset,
+              controller: spineController,
               bundle: bundle,
-              key: ValueKey(_appearance.id),
-              fit: BoxFit.contain,
-              alignment: Alignment.bottomCenter,
+              key: ValueKey(spineController),
             ),
           ],
         );
@@ -3354,7 +3379,7 @@ importance 使用 1-5。誓言/承诺用 promise，告白用 confession，严重
             fit: StackFit.expand,
             clipBehavior: Clip.none,
             children: [
-              if (_appearance.animated && _appearance.id != 'standing_99')
+              if (_appearance.animated && !_appearance.isStanding)
                 Positioned.fill(
                   child: IgnorePointer(
                     child: Transform.translate(
@@ -4506,11 +4531,15 @@ class _AppearancePickerSheet extends StatelessWidget {
     required this.liquidGlass,
     required this.selectedId,
     required this.onSelected,
+    required this.language,
+    required this.onTextureChanged,
   });
 
   final bool liquidGlass;
   final String selectedId;
   final ValueChanged<CharacterAppearance> onSelected;
+  final AppLanguage language;
+  final VoidCallback onTextureChanged;
 
   @override
   Widget build(BuildContext context) {
@@ -4588,6 +4617,12 @@ class _AppearancePickerSheet extends StatelessWidget {
                           ),
                     onTap: () => onSelected(appearance),
                   ),
+                SkinImportControls(
+                  appearance: characterAppearanceById(selectedId),
+                  language: language,
+                  onImported: onSelected,
+                  onTextureChanged: onTextureChanged,
+                ),
               ],
             ),
           ),

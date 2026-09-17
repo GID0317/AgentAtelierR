@@ -13,6 +13,8 @@ import 'src/app_localization.dart';
 import 'src/app_theme.dart';
 import 'src/app_shell.dart';
 import 'src/runtime_log.dart';
+import 'src/local_skin_store.dart';
+import 'src/character_appearance.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -72,6 +74,8 @@ class _BootstrapAppState extends State<_BootstrapApp> {
           ),
         ),
       );
+      await LocalSkinStore.instance.initialize();
+      registerLocalSkinAppearances();
       final controller = await AppController.load();
       if (mounted) setState(() => _controller = controller);
     } on Object catch (error, stackTrace) {
