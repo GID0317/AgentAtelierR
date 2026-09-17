@@ -300,23 +300,27 @@ class _ChatScreenState extends State<ChatScreen> {
       maxDeltaTime: 0.05,
       paintOverflow: const EdgeInsets.only(top: 160),
       onInitialized: (controller) {
-        if (!identical(spineController, _spineController)) return;
-        controller.animationState.getData().setDefaultMix(0.38);
-        _currentIdleAnimation = appearance.idleAnimations.first;
-        controller.animationState.setAnimationByName(
-          0,
-          _currentIdleAnimation!,
-          true,
-        );
+        // fromDrawable initializes synchronously while its parent is building.
+        // A skin may also be replaced before this frame has finished.
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted || !identical(spineController, _spineController)) return;
+          controller.animationState.getData().setDefaultMix(0.38);
+          _currentIdleAnimation = appearance.idleAnimations.first;
+          controller.animationState.setAnimationByName(
+            0,
+            _currentIdleAnimation!,
+            true,
+          );
 
-        _scheduleIdleChange();
-        if (mounted) setState(() => _spineReady = true);
-        _applyExpression(_currentExpression);
-        if (_isCharacterSpeaking) {
-          _scheduleFacialDetailChange();
-          _scheduleCharacterBlink();
-        }
-        unawaited(_loadMotionGroups(appearance));
+          _scheduleIdleChange();
+          setState(() => _spineReady = true);
+          _applyExpression(_currentExpression);
+          if (_isCharacterSpeaking) {
+            _scheduleFacialDetailChange();
+            _scheduleCharacterBlink();
+          }
+          unawaited(_loadMotionGroups(appearance));
+        });
       },
     );
     return spineController;
