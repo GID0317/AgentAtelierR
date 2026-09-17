@@ -30,6 +30,7 @@ class CharacterPerformanceProfile {
     this.rollBones, [
     this.emotionProfiles = const {},
     this.decayRates = const {},
+    this.ambientGaze = const {},
   ]);
 
   final List<Map<String, dynamic>> drivers;
@@ -37,6 +38,27 @@ class CharacterPerformanceProfile {
   final Map<String, String> rollBones;
   final Map<String, dynamic> emotionProfiles;
   final Map<String, dynamic> decayRates;
+  final Map<String, dynamic> ambientGaze;
+
+  RigMotion constrainAmbient(RigMotion motion) {
+    double limit(String key, double fallback) {
+      final value = ambientGaze[key];
+      return value is num && value.isFinite
+          ? value.toDouble().clamp(-1.0, 1.0)
+          : fallback;
+    }
+
+    final yaw = limit('yawLimit', 1).abs();
+    final down = limit('pitchDownLimit', -1).clamp(-1.0, 0.0);
+    final up = limit('pitchUpLimit', 1).clamp(0.0, 1.0);
+    final minus = limit('rollMinusLimit', -1).clamp(-1.0, 0.0);
+    final plus = limit('rollPlusLimit', 1).clamp(0.0, 1.0);
+    return RigMotion(
+      motion.yaw.clamp(-yaw, yaw),
+      motion.pitch.clamp(down, up),
+      motion.roll.clamp(minus, plus),
+    );
+  }
 
   Map<String, dynamic> tensionProfile(String emotion, String band) {
     final profile = emotionProfiles[emotion] ?? emotionProfiles['neutral'];
@@ -84,6 +106,9 @@ class CharacterPerformanceProfile {
                     as Map?)?['decayRates']
                 as Map? ??
             {},
+      ),
+      Map<String, dynamic>.from(
+        (json['projectConfig'] as Map?)?['ambientGaze'] as Map? ?? {},
       ),
     );
   }
@@ -230,10 +255,12 @@ class CharacterPerformanceDirector {
       // A new lead part starts at its own current pose. Reusing one shared
       // head target here used to transfer it abruptly to the body or eyes.
       _from = Map.of(_parts);
-      final motion = RigMotion(
-        _range(_driver!, 'yaw', 0, -1, 1),
-        _range(_driver!, 'pitch', 0, -1, 1),
-        _range(_driver!, 'roll', 0, -1, 1),
+      final motion = profile.constrainAmbient(
+        RigMotion(
+          _range(_driver!, 'yaw', 0, -1, 1),
+          _range(_driver!, 'pitch', 0, -1, 1),
+          _range(_driver!, 'roll', 0, -1, 1),
+        ),
       );
       _target = {(_driver!['driver'] as String? ?? 'head'): motion};
       _followerDelays.clear();

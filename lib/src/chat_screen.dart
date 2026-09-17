@@ -435,6 +435,7 @@ class _ChatScreenState extends State<ChatScreen> {
       _scheduleIdleChange();
       _scheduleMicroMotion();
       _scheduleCharacterBlink();
+      _scheduleFacialDetailChange();
     } on Object catch (error, stack) {
       if (generation == _motionLoadGeneration) _motionGroups = const [];
       RuntimeLog.instance.error('CharacterMotion', error, stack);
@@ -1078,6 +1079,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _scheduleMicroMotion();
     _scheduleExpressionRelax();
     _scheduleCharacterBlink();
+    _scheduleFacialDetailChange();
   }
 
   void _scheduleExpressionRelax() {
@@ -1354,8 +1356,17 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _scheduleFacialDetailChange() {
     _facialDetailTimer?.cancel();
-    if (!_isCharacterSpeaking) return;
-    _facialDetailTimer = Timer(_randomDuration(6, 10), _rotateFacialDetail);
+    if (!mounted || !_spineReady) return;
+    final profile = _resourceEmotion;
+    _facialDetailTimer = Timer(
+      _isCharacterSpeaking
+          ? _randomDuration(6, 10)
+          : _randomDuration(
+              max(6, profile?.poseRerollIntervalMin ?? 8),
+              max(10, profile?.poseRerollIntervalMax ?? 14),
+            ),
+      _rotateFacialDetail,
+    );
   }
 
   void _rotateFacialDetail() {
@@ -1364,10 +1375,10 @@ class _ChatScreenState extends State<ChatScreen> {
       return;
     }
     if (!mounted ||
-        !_isCharacterSpeaking ||
         _tapReactionActive ||
         !_spineReady ||
         _spineController == null) {
+      _scheduleFacialDetailChange();
       return;
     }
     final skeletonData = _spineController!.skeletonData;
@@ -1380,7 +1391,19 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     if (_resourceEmotion?.expressionSets.isNotEmpty ?? false) {
       _selectResourceExpression(renew: true);
+      // Preserve the authored eye/brow/mouth tuple at rest. During speech,
+      // the audio-driven mouth keeps ownership of its animation track.
       _applyFacialDetails();
+      if (!_isCharacterSpeaking) {
+        final mouth = _resolveResourceClip(_activeResourceExpression?.mouth);
+        if (isStableIdleMouth(mouth)) {
+          _setFacialAnimation(
+            13,
+            mouth!,
+            mixDuration: _resourceEmotion?.mixDurationEye ?? 0.16,
+          );
+        }
+      }
       _scheduleFacialDetailChange();
       return;
     }
